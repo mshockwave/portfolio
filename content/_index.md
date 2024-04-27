@@ -1,23 +1,17 @@
 ---
-title: "ᕦʕ •ᴥ•ʔᕤ"
+title: "Min Hsu's Homepage"
 ---
 
-Today's websites are bloated, slow, and full of scripts, ads, and trackers. This
-became so commonplace that we lost all sense of perspective, to the point that
-we now think multi-megabyte webpages are normal.
+#### About Me
+<img src="/images/formal2-tiny.jpg" alt="profile pic" style="width: 35%"/>
 
-> The internet has become a bloated mess. Huge JavaScript libraries, countless
-> client-side queries and overly complex frontend frameworks are par for the
-> course these days.
->
-> --- [Kev Quirk](https://512kb.club/)
+My name is **Min-Yih "Min" Hsu**. I work as a compiler engineer at [SiFive](https://www.sifive.com/) and am currently based in the beautiful Southern California, United States.
 
-Let's change this, one website at a time! **Hugo Simple** is a
-[Hugo](https://gohugo.io/) theme based on [Simple.css](https://simplecss.org/) and
-[Hugo Bear](https://github.com/janraasch/hugo-bearblog/) that takes care of speed and
-optimization, so you can focus on writing good content.
+I have been actively contributing to [LLVM](https://llvm.org) for over 5 years; I served on the program commitee for multiple LLVM Developer's Meetings.
+I wrote a LLVM book in 2021 titled [_LLVM Techniques, Tips, and Best Practices Clang and Middle-End Libraries_](https://a.co/d/0AXkEdI).
+I'm also the code owner and primary maintainer of LLVM's M68k compiler backend.
 
-It is free, multilingual, optimized for search engines, no-nonsense, responsive,
-light, and fast. Really fast.
+I received my Ph.D. in Computer Science from University of California, Irvine (UCI) in 2023; my doctoral advisor is [Prof. Dr. Michael Franz](https://www.michaelfranz.com/).
 
-Made with 💟 by [Shaolong Chen](https://github.com/maolonglong).
+
+<a class="button" href="/cv-resume.pdf" target="_blank">My Résumé (PDF)</a>

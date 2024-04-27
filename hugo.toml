@@ -1,9 +1,9 @@
 # Basic config
-baseURL = "https://maolonglong.github.io/hugo-simple-starter"
+baseURL = "https://myhsu.xyz/"
 theme = "hugo-simple"
 languageCode = "en"                # zh-Hans
-title = "Hugo Simple"
-copyright = "© 2024 Shaolong Chen"
+title = "Min Hsu's Homepage"
+copyright = "© 2024 Min-Yih Hsu"
 
 # Generate a nice robots.txt for SEO
 enableRobotsTXT = true
@@ -33,27 +33,39 @@ noClasses = true
 style = "catppuccin-mocha"
 
 [params]
-title = "Hugo Simple"
-description = "Hugo Simple Demo"
-favicon = "images/favicon.png"
+title = "Min Hsu's Homepage"
+description = "Min-Yih \"Min\" Hsu's Personal Website"
 dateFormat = "2006-01-02"
 hideMadeWithLine = false
-hideRSSLink = false
+hideRSSLink = true
 [params.author]
-name = "Shaolong Chen"
-email = "shaolong.chen@outlook.it"
+name = "Min-Yih Hsu"
+email = "min@myhsu.dev"
 
 [[menu.main]]
 name = "Home"
 pageRef = "/"
 weight = 10
 [[menu.main]]
+name = "Publications"
+pageRef = "/publications"
+weight = 20
+[[menu.main]]
 name = "Blog"
 pageRef = "/blog"
-weight = 20
+weight = 30
 
-[services.rss]
-limit = 42
+[[menu.main]]
+name = "GitHub"
+url = "https://github.com/mshockwave"
+weight = 40
+[[menu.main]]
+name = "LinkedIn"
+url = "https://www.linkedin.com/in/bekketmcclane/"
+weight = 40
+
+#[services.rss]
+#limit = 42
 
 [outputs]
 # Generate RSS for home only.
