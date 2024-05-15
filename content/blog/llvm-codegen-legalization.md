@@ -1,38 +1,37 @@
 +++
 title = "Legalizations in LLVM Backend"
-date = "2024-04-28"
-draft = true
+date = "2024-05-15"
 tags = ['llvm', 'compiler-codegen']
 +++
 
 Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
 While there are exceptions and corner cases, this holds in the majority of cases.
-Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively _emulate_ that
-specific feature.
+Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively _emulate_ those
+features.
 
-This sounds distant and even a little scary, but I'm not even talking about a problem that only happens on some exotic proprietary ML accelerator whutnuts. There is a good
+This might sound a little distant to our typical software development experiences, but I'm not even talking about a problem that only happens on some exotic proprietary ML accelerator whatnots. There is a good
 example of this regarding something you use almost everyday: **boolean variables**.
 I'm pretty sure none of the modern processors provides 1-bit registers[^1] (or addressable memory space), yet we still use boolean variables extensively.
+Other common examples include the lack of double-precision floating point operations, or even lacks floating point unit altogether in some embedded devices.
 
 [^1]: Status registers like EFLAGS in X86 might qualify (I mean its individual status bits), but it's still far away from being generally usable.
 
-Other common examples include the lack of double-precision floating point operations, or even lacks floating point unit altogether in some embedded devices.
-The process that "reshapes" input programs into using what's available on the target hardware is called **legalization** in LLVM, and it's done in LLVM's code generation (codegen)
-pipeline a.k.a the backend[^2].
+The process that "reshapes" input programs into using what's available on the target hardware is called **legalization** in LLVM[^2], and it's done in LLVM's code generation (codegen)
+pipeline a.k.a the **backend**.
 In this post, I'm going to give an overview on how it works.
 
 [^2]: Though frontends like Clang do generate target-specific LLVM IR, a lot of those target-specific bits are in regard to ABI conformance rather than legalizations.
 
 ### A sneak peek into SelectionDAG ISel
-LLVM's codegen pipeline in the backend is consisted of LLVM Passes, same as the middle-end[^3]. This long long pipeline is usually segmented by important events, and the
-legalization happens around one of the earlier ones, instruction selection (ISel).
+LLVM's codegen pipeline in the backend is consisted of LLVM Passes, same as the middle-end[^3]. This long long pipeline is usually partitioned by important events like register allocation and instruction scheduling, and the
+legalization happens around one of the earlier events, the instruction selection (ISel).
 
 [^3]: At the time of writing, the codegen pipeline hasn't migrated to using the _new_ PassManager yet, while the middle-end had wrapped up the migration years ago.
 
-LLVM has several different ISel stratgies co-existing at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemneted by every targets.
+Several different ISel stratgies co-existing in LLVM at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemneted by every targets.
 This ISel turns instrutions in each basic block into a DAG, different from the "linear" representation of instructions as we seen in LLVM IR.
 
-Though this DAG is not so relevant in our discussion here, we can roughly divide SelectionDAG ISel further into 4 steps, they are:
+We can roughly divide SelectionDAG ISel further into 4 steps, they are:
   1. Building SelectionDAG
   2. Type legalization
   3. Legalizing operations
