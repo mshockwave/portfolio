@@ -5,7 +5,7 @@ draft = true
 tags = ['llvm', 'compiler-codegen']
 +++
 
-In an ideal world, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
+Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
 While there are exceptions and corner cases, this holds in the majority of cases.
 Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively _emulate_ that
 specific feature.
@@ -40,7 +40,7 @@ Though this DAG is not so relevant in our discussion here, we can roughly divide
 
 There are actually lots of going on in between the steps, like optimizing the DAG (by DAGCombiner) and LegalizeVectorOps in the presence of vectors (which should really be called "scalarize vector ops"). But in any case, legalization is primarily consist of two separate steps, type legalization and legalizing the operations (i.e. instructions). Let's cover these two in order.
 
-#### Type legalization
+### Type legalization
 Type legalization tries to turn unsupported types into the ones supported by the target architecture. To give you a better idea on how this works in action, let's send the following
 LLVM IR snippet into SelectionDAG ISel and see how it got legalized.
 ```llvm
@@ -163,13 +163,13 @@ t10: i32 = select t20, t2, Constant:i32<9>
 ```
 The result of `setcc` is changed from `i1` to `i32`, whose higher 31 bits are cleared by the mask before feeding into the `select` operation.
 
-##### Determining legal types and actions on illegal types
+#### Determining legal types and actions on illegal types
 So how is a type to be considered legal or illegal in a target? In LLVM, the criteria is pretty straightforward: types that can natively fit into physical register are considered legal and deemed illegal otherwise. This information is setup by a target in its TargetLowering, which is usually put in `XXXXISelLowering.cpp` where "XXXX" is the target name. For instance, in RISC-V, it looks like:
-```cpp
+```c
 // Set up the register classes.
 addRegisterClass(XLenVT, &RISCV::GPRRegClass);
 ```
-In which `XLenVT` represents 32-bit integer for RV32 and 64-bit integer for RV64 (64-bit RISC-V). Take RV32 as an example, this line basically says that `GPRRegClass` -- a group of general-purpose registers -- can carry 32-bit integers. Since `GPRRegClass` is the only integer reigster class in RISC-V, 32-bit integer is the only legal integer type in RV32[^4].
+In which `XLenVT` represents 32-bit integer in RV32 and 64-bit integer in RV64 (64-bit RISC-V). Take RV32 as an example, this line basically says that `GPRRegClass` -- a group of general-purpose registers -- can carry 32-bit integers. Since `GPRRegClass` is the only integer reigster class in RISC-V, 32-bit integer is the only legal integer type in RV32[^4].
 
 [^4]: Floating point is optional in RISC-V, and we're not covering it here either.
 
@@ -178,4 +178,219 @@ What's a little more complicate is how we deal with illegal types. The type lega
 The type legalizer has a pre-defined sequence to perform for each of these legalization actions, so a target doesn't really have to specify how to actually do the legalization in this part.
 
 
-An important takeaway from type legalization is that it looks at every single value appears in the program, checks its type and tries to legalize it if needed. It doesn't care what **operation** the value came from. In other words, legal type in this phase is a _global_ concept, indepdent from individual operations. This is different from what we're going to see in legalizing operation in the next section, where individual operation has different interpretations of its own legality.
+An important takeaway from type legalization is that it looks at every single value appears in the program, checks its type and tries legalizing it if needed. It doesn't care what **operation** the value came from. In other words, the concept of legal type in this phase is _global_ and indepdent from individual operations. This is different from what we're going to see in legalizing operation in the next section, where individual operation has different interpretations of its own legality.
+
+### Legalizing operations
+A SelectionDAG is generated from a single basic block of the source LLVM IR. Each instruction in the basic block is basically translated into a single SelectionDAG node[^5] called `SDNode`, representing an operation like `t16: i32 = add t2, Constant:i32<5>` we've seen previously. Initially, each SDNode has a **generic**, target-independent opcode. In a (heavily) hand-waving analogy, a SDNode in this stage is basically an one-to-one translation from its LLVM instruction which is equally target-independent.
+Nearly all of the SDNodes we've seen so far in the examples, like `t20: i32 = and t17, Constant:i32<1>` and `t16: i32 = add t2, Constant:i32<5>` are SDNodes with generic opcodes[^6].
+
+[^5]: Well, not always a single SDNode, since the SelectionDAG builder actually delegates lots of DAG building logics to each target and each target can definitely generate more than one SDNode from a LLVM instruction. The most notable example is function calls: each target implements `TargetLowering::LowerCall` to lower a `llvm::CallInst` to its native function call constructions consisting of one or more SDNodes.
+
+[^6]: The full list of opcodes can be found under [llvm/include/llvm/CodeGen/ISDOpcodes.h](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/CodeGen/ISDOpcodes.h).
+
+Not every of these SDNodes have its corresponding native instructions in the target hardware, though. For instance, some less-powerful processors do not natively support rotate  / funnel shifts. Meaning, in those cases we have to turn an operation rotating left by 3 bits (e.g. `t4: i32 = rotl t2, Constant:i32<3>`) into something else, for instance . For these targets, a `rotl` operation is considered _illegal_ and we're **legalizing** such operations into supported, legal operations in the phase follows type-legalization.
+
+{{% details "What are funnel / rotate shifts"%}}
+Funnel shift is a special variant of bit shifting that fills in the spaces left by bits shifted away with bits from another value. It's a function that takes two bit sequences (e.g. integers) and a constant value specifying the number of bits to shift.
+For example, given two 5-bit integers A and B:
+```
+MSB                    LSB
+| A4 | A3 | A2 | A1 | A0 |
+--------------------------
+| B4 | B3 | B2 | B1 | B0 |
+```
+Funnel left shift A and B by 2 bits, `funnel_left(A, B, 2)`, yields the following result:
+```
+| A2 | A1 | A0 | B4 | B3 |
+```
+You can imagine it being A shifts left by 2 bits while the empty space in the lower bits are filled in by the higher two bits of B.
+
+If A and B are identical, for instance `funnel_left(A, A, 2)`, then it becomes a **rotate left** operation, as it yields the following result that looks like the higher bits in A that got shifted out are "wrapping around" to the lower bits:
+```
+| A2 | A1 | A0 | A4 | A3 |
+```
+{{% /details %}}
+
+In fact, since RISC-V's rotate instructions are optional (they are defined in Zbb and Zbkb extensions), let's see how RISC-V handles rotate _in absence of_ native rotate instructions. Here is the input LLVM IR:
+
+```llvm
+define i32 @foo(i32 %v) {
+  %r = call i32 @llvm.fshl.i32(i32 %v, i32 %v, i32 3)
+  ret i32 %r
+}
+```
+`llvm.fshl.*` is the [intrinsic](https://llvm.org/docs/LangRef.html#llvm-fshl-intrinsic) for funnel left shifts.
+If we use the exactly same `llc` command as earlier to compile this snippet and dump the DAGs, this is the (optimized) DAG right after type-legalization:
+```llvm
+  t0: ch,glue = EntryToken
+      t2: i32,ch = CopyFromReg t0, Register:i32 %0
+    t4: i32 = rotl t2, Constant:i32<3>
+  t6: ch,glue = CopyToReg t0, Register:i32 $x10, t4
+  t7: ch = RISCVISD::RET_GLUE t6, Register:i32 $x10, t6:1
+```
+`rotl` on line 3 is the rotate left operation. It rotates its first operand (`t2`) by the number of bits specified in the second operand (i.e. 3).
+
+After legalizing operations, we have the following DAG:
+```llvm
+  t0: ch,glue = EntryToken
+  t2: i32,ch = CopyFromReg t0, Register:i32 %0
+      t11: i32 = shl t2, Constant:i32<3>
+      t13: i32 = srl t2, Constant:i32<29>
+    t14: i32 = or t11, t13
+  t6: ch,glue = CopyToReg t0, Register:i32 $x10, t14
+  t7: ch = RISCVISD::RET_GLUE t6, Register:i32 $x10, t6:1
+```
+Line 3 to 5 in the post-legalized DAG show that we legalize `rotl` by _synthesizing_ it with bitwise OR on the extractions of higher-bit part (i.e. `t11: i32 = shl t2, Constant:i32<3>`) and lower-bit part (i.e. `t13: i32 = srl t2, Constant:i32<29>`).
+
+Of course, there are more than one way to legalize an operation. For instance, on embedded devices that don't have multiplication instructions, we might legalize a `mul` by simply replacing it with a call to library functions that "emulate" multiplications with a sequence of additions.
+
+This brings us to the next section, where we ask a similar question we had seen before: how is an operation considered legal or illegal in a specific target? How do we handle illegal operations?
+
+#### Determine legal operations and actions on illegal operations
+Contrary to what we've seen in type legalizer, each target has to declare its own illegal operations and specify the desired way to handle each of them. This information is also placed in each target's TargetLowering (put under `XXXXISelLowering.cpp`). For example, RISC-V uses the following lines from [here](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L353) (abridged for clarity) to declare multiplications being illegal in the absent of Zbb / Zbkb extensions, and how to handle it:
+```c
+if (!Subtarget.hasStdExtZbb() && !Subtarget.hasStdExtZbkb())
+  setOperationAction({ISD::ROTL, ISD::ROTR}, XLenVT, Expand);
+```
+`setOperationAction` is the key here: for each opcode specified in its first argument (`ISD::ROTL` and `ISD::ROTR` in this case) that operates on value type specified by its second argument (i.e. `XLenVT`), we perform an action on the third argument (`Expand` in this case) to legalize it.
+
+Let's look at the third argument first, here are the possible actions we can do to legalize an operation:
+  - Expand
+  - LibCall
+  - Promote
+  - Custom
+
+**Expand** tries to synthesize an operation with other legal operations, which we had seen how it worked on rotate left. The "recipe" to expand an operation is pre-defined (rather than defined by each target). If you're interested in learning what these recipes look like, most of them are put under `llvm/lib/CodeGen/SelectionDAG/TargetLowering.cpp` and `llvm/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp`.
+
+If the legalizer fails to expand an operation (e.g. none of the sub-operations used in synthesis are legal), it will fallback to the next action, **LibCall**, which replaces the operation with calls to library functions. Of course, a target can just set an operation's legalizer action directly to this. For instance, RISC-V [always uses](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L1409) lock-free atomic builtin functions when the `forced-atomic` feature is enabled.
+
+**Promote** will promote an operation to operate on the next larger legal type. For instance, in a target where 32-bit and 64-bit integers are the legal types, `t3:i32 = add t2, Constant:i32<5>` will be promoted to `t3:i64 = add t2, Constant:i64<5>`. The recipes of how to promote individual operations are pre-defined, too. In fact, they are the same routines that are also used by the type legalizer.
+Now, since we mentioned type legalizer, you may wonder: didn't we finish type legalization already? Why do we need to deal with type legality again?
+
+Recall our takeaway at the end of last section: type legalization only cares about "globally illegal" types. That are, types which can't natively fit into any of the physical registers. It turns arbitrary types that can be as crazy as `i17` or `i87` into a small subset of legal types and it does this in an operation-agnostic fashion.
+But within this small subset of legal types, some operations might only capable of handling an even _smaller_ number of (legal) types!
+
+An interesting example in RISC-V is the _Zfhmin_ extension. Zfhmin is designed for a special scenarios where floating point values are stored in 16-bit format (i.e. F16), but majority of the arithmetics still operates on normal 32-bit floating points (i.e. F32). Therefore, in Zfhmin only data conversion / type casting operations like `fcvt.s.h` (convert from F16 to F32) support F16 while rest of the floating point operations are same as the F extension, which operate on F32. To deal with this type mixing, RISC-V backend declares F16 as legal type when Zfhmin is present, but mandates that all non-conversion F16 arithmetic instructions have to be promoted to F32 in this scenario:
+```c
+static const unsigned ZfhminZfbfminPromoteOps[] = {
+    ISD::FMINNUM,      ISD::FMAXNUM,       ISD::FADD,
+    ISD::FSUB,         ISD::FMUL,          ISD::FMA,
+    ISD::FDIV,         ISD::FSQRT,         ISD::FABS,
+    ISD::FNEG,         ...};
+...
+if (Subtarget.hasStdExtZfhminOrZhinxmin() && !Subtarget.hasStdExtZfhOrZhinx())
+  setOperationAction(ZfhminZfbfminPromoteOps, MVT::f16, Promote);
+```
+(The above snippet is adapted from [here](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L457))
+
+Now, onto the last legalization action: **Custom**.
+As the name suggested, this is basically a wildcard action that allows a target to do whatever it wants on a generic SDNode. For each operation assigned to this action, `XXXXTargetLowering::LowerOperation` implements the actual legalization.
+
+Take `ISD::FMINIMUM` and `ISD::FMAXIMUM` as an example, these two are floating point min/max operations conforming to IEEE-754-**2019** standard. The F extension in RISC-V, however, mostly[^7] conforms to IEEE-754-**2008** standard. Biggest difference between these two? Only IEEE-754-2019 propagates the NaN (Not-A-Number): If _either_ A or B is a NaN, `fmaximum(A, B)` in IEEE-754-2019 returns a NaN; RISC-V's `fmaximum(A, B)`, on the other hand, returns NaN only if _both_ A and B are NaNs.
+
+[^7]: Except the fact that RISC-V's F extension does make -0.0 smaller than +0.0, which is a IEEE-754-2019 feature.
+
+So for RISC-V, doing custom legalization on `ISD::FMINIMUM` and `ISD::FMAXIMUM` would be an easier option to overcome this semantic mismatch.
+```c
+if (Subtarget.hasStdExtFOrZfinx() && !Subtarget.hasStdExtZfa())
+  setOperationAction({ISD::FMAXIMUM, ISD::FMINIMUM}, MVT::f32, Custom);
+```
+Then, in `lowerFMAXIMUM_FMINIMUM`, the [function](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L5725) `RISCVTargetLowering::LowerOperation` calls to legalize those two operations, RISC-V adds an additional check that conditionally returns the result from its native fminimum/fmaximum instructions only when _neither_ of the operands is NaN; otherwise, it returns a NaN.
+
+Another thing worth noting is that, if a custom legalize action failed (e.g. the custom handler doesn't recognize/support the code it's looking at), it falls back to _Expand_. So the complete "chain of legalizer fallbacks" would be: Custom -> Expand -> LibCall.
+
+#### The value type to legalize
+Before wrapping up this section, I would like to spend some time on the second argument of `setOperationAction`: value type of the operation it's trying to legalize.
+Theoritically, it represent the subset of legal types -- given the fact that we have finished type legalization at this stage -- that are not supported in a specific operation and demanded further legalizations.
+
+As it turns out, _illegal_ types can also be used on this argument!
+
+For instance, in RV64 where 32-bit integer is considered an illegal type[^8], we have the following line (abridged for clarity) for even the most basic operations like `ISD::ADD`:
+```c
+if (Subtarget.is64Bit())
+  setOperationAction({ISD::ADD, ISD::SUB, ISD::SHL, ISD::SRA, ISD::SRL},
+                      MVT::i32, Custom);
+```
+[^8]: Unless you flip an experimental flag `-riscv-experimental-rv64-legal-i32` to say otherwise.
+
+The truth is that, the relationship between type and operation legalizer is more...interwinded than we thought. Type legalizer mostly runs in an operation-agnostic fashion, but when it sees an illegal type, it actually asks the operation legalizer if there is a `Custom` action handler attached on this operation with the said illegal type, and tries to run that custom (operation) legalization preemptively.
+
+The idea is that we want to have a leeway to legalize an operation with its _original_ value type. Because unlike LLVM IR where we have explicit `zext`, `sext`, or `trunc` instructions to specify type conversions, in SelectionDAG all these extensions / truncations might be lowered into operations like `and t2, <bit mask>` (for zero extension) anytime before we actually legalize the operation, which increases the difficulties to recover those information.
+Therefore, `Custom` legalizer action is allowed to handle illegal types.
+
+Back to our RV64 example, the reason it wants custom legalization on `i32` is due to RV64's unique _widening_ instructions, like `ADDW`, which takes two 32-bit integers and sign-extends them into 64-bit integers before the actual (64-bit) arithmetic addition. By replacing the original operations with these widening instructions preemptively in the [custom handler](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L11971), we could avoid extra sign-extension instructions that would have been created (by type legalizer) for each of its operands otherwise.
+
+Since we have brought up `ADDW`, an instruction with 32-bit operands and 64-bit result, another interesting question related to `setOperationAction`'s second argument is: _whose_ type does this argument refer to? result type(s)? operand types? _which_ operand's type?
+
+For most of the instructions in majority of architectures, this is barely a question, since operands and results in simple arithmetics like ADD, SUB, and MUL usually have the same data type. But as we've seen in `ADDW`'s example, that's not always the case. Even worse, many operations don't even have a uniform data type for all their operands!
+
+Take **vector reduction** as an example, it is a common vector operation that aggregates vector elements by a specific action (e.g. add, mul, and). For instance, the `llvm.vector.reduce.add` [intrinsic](https://llvm.org/docs/LangRef.html#llvm-vector-reduce-add-intrinsic) produces an integer result that is the _summation_ of all its elements. Some of its variant, `llvm.vector.reduce.fadd` which performs floating point add reduction, [has](https://llvm.org/docs/LangRef.html#llvm-vector-reduce-fadd-intrinsic) a _scalar_ start value as its first operand and the vector to sum up as the second operand.
+```llvm
+declare float @llvm.vector.reduce.fadd.v4f32(float %start_value, <4 x float> %v)
+```
+In this case, which type should we specify in `setOperationAction` for `ISD::VECREDUCE_FADD` (the opcode of `llvm.vector.reduce.fadd`)?
+```c
+setOperationAction(ISD::VECREDUCE_FADD, ???, Custom);
+```
+The answer for this particular question is the scalar operand's type (i.e. `float`). But can we use the vector operand's type instead to determine the legality of this operation? 
+
+Unfrotunately, no.
+
+The legalizer has already set the rule on which operand type or result type to use. This might not be a huge inconvenient in most cases, yet it still causes confusions and ambiguities sometimes, largely because these rules are not written in any documentations! (or any TableGen or .inc / .def files for easier lookups[^9]) They only appear in legalizer's codebase, specifically in the `SelectionDAGLegalize::LegalizeOp` function for most rules.
+
+[^9]: One exception might be VP (Vector Predicated) intrinsics, whose operand for legalization can be found in `llvm/include/llvm/IR/VPIntrinsics.def`.
+
+In addition to this issue, so far we've seen several shortcomings on how legalization is designed in SelectionDAG ISel. In the last section of this post, I'm going to briefly show you how another instruction selection framework in LLVM, **GlobalISel**, addresses some of these problems.
+
+### Legalization in GlobalISel: a comparison
+GlobalISel is a relatively new instruction selection framework designed to improve compilation time while producing code with a decent quality. It deserves its own blog posts (or even series!) so we're not going into the details here, but covering only its legalization component.
+
+But even before switching the topic to GlobalISel, let's jump back to SelectionDAG ISel and take a moment to think about its overall flow:
+
+  1. At the beginning, values from LLVM IR can have arbitrary types so crazy types like `i17` and `i87` might sprinkle here and there.
+  2. Type legalizer goes all the way to turn _every_ of these illegal types into a small set of legal types.
+  3. But then, you found out: "Oops, each operation might have their own preference on the types it supports". Namely, these types are what an operation _actually_ wants.
+  4. We legalizes individal operations to iron out those unsupported legal types as well as unsupported operations.
+  5. But if our focus has always been the types supported by individual operations...
+
+_Then why can't we just jump from Step (1) to Step (4)?_
+
+Why can't we **consolidate** type and operation legalization into a single stage?
+
+And that is basically what GlobalISel does: for each operation, the target specifies its type legality as well as necessary actions (e.g. expansion) to make it legal. This is expressed in a similar manner as the `setOperationAction` we've seen in SelectionDAG ISel. Let's look at an example from RISC-V GlobalISel legalizer:
+```c
+getActionDefinitionsBuilder({G_ADD, G_SUB, G_AND, G_OR, G_XOR})
+    .legalFor({s32, sXLen})
+    .legalIf(typeIsLegalIntOrFPVec(0, IntOrFPVecTys, ST))
+    .widenScalarToNextPow2(0)
+    .clampScalar(0, s32, sXLen);
+```
+`getActionDefinitionsBuilder` here specifies the legality of operations listed in its first argument: `G_ADD`, `G_SUB`, `G_AND` etc. They are opcodes for (generic) operations in GlobalISel, similar to `ISD::ADD`, `ISD::SUB`, and `ISD::AND` in SelectionDAG ISel.
+
+The next line describes the legal types of its operands. More specifically, `legalFor({s32, sXLen})` says that operand 0 is considered legal if it's a 32-bit scalar or a `XLen` type. Note that the first operand of an operation in GlobalISel, called a [generic Machine IR (gMIR)](https://llvm.org/docs/GlobalISel/GMIR.html) instruction, actually represents the instruction's **result**. So we're specifying the legal result type here; the line after is doing a similar thing, but calling out to another predicate function `typeIsLegalIntOrFPVec` to determine the legality.
+
+After declaring the legal types, it's time to describe how to deal with the _illegal_ ones (e.g. crazy types like `i17` and `i87`). If we look at the lines follows, `widenScalarToNextPow2(0)` will make illegal types at operand 0 widen to the next type with power-of-two size, before the resulting types being clamped by `clampScalar` into a type range bounded by 32-bit scalar and `XLen`.
+
+The aforementioned function calls compose a chain of legalization steps consisting of _checks_ (e.g. `legalFor`) and _actions_ (e.g. `clampScalar`) that are executed in sequence. There are also some familiar actions that we've seen earlier, for example:
+```c
+getActionDefinitionsBuilder(G_SEXT_INREG)
+    .customFor({sXLen})
+    .maxScalar(0, sXLen)
+    .lower();
+```
+`customFor` has the same effect as the `Custom` action we've seen in `setOperationAction`: delegating the legalization to custom handlers reside in each target's `LegalizerInfo::legalizeCustom`. If this step fails, it falls to the next action, `maxScalar`, which sets an upper bound on the type size and goes to the final action, `lower`, which is basically the `Expand` action in SelectionDAG's legalizer.
+
+In the previous section, we mentioned that SelectionDAG legalizer uses one of the operand types to check against the second argument of `setOperationAction` for determining the operation's legality. As of which operand types to pick, it's predefined and sometimes causing some confusions and ambiguities.
+
+GlobalISel's legalizer, on the other hand, has more flexibility on which operand you want to legalize. We've already got a hint from our previous examples, where we can designate a specific operand index subject to the legalizer action. So for instructions without a uniform operand types, like interger-to-pointer, it becomes easy to specify the action for its integer operand only:
+```c
+getActionDefinitionsBuilder(G_INTTOPTR)
+    .legalFor({{p0, sXLen}})
+    .clampScalar(1, sXLen, sXLen);
+```
+To summarize, GlobalISel's legalizer expresses legalities -- especially type legalities -- in a more _explicit_ way. Consolidating all legalizations into one phase also helps people to understand them better.
+
+### Epilogue
+Without a doubt, we need to create more learning resources for LLVM backend development. This post is my humble effort to shed some lights on a really important backend subsystem, which we're not even able to get to instruction selection without it. I hope you learn how SelectionDAG ISel's type and operation legalizer interacts with each other and how to specify the action to legalize illegal types or operations. I also hope you enjoy the last section on a more modern legalizer design.
+
+Thanks for reading!
