@@ -387,7 +387,8 @@ Therefore, <code>Custom</code> legalizer action is allowed to handle illegal typ
 </ol>
 <p><em>Then why can&rsquo;t we just jump from Step (1) to Step (4)?</em></p>
 <p>Why can&rsquo;t we <strong>consolidate</strong> type and operation legalization into a single stage?</p>
-<p>And that is basically what GlobalISel does: for each operation, the target specifies its type legality as well as necessary actions (e.g. expansion) to make it legal. This is expressed in a similar manner as the <code>setOperationAction</code> we&rsquo;ve seen in SelectionDAG ISel. Let&rsquo;s look at an example from RISC-V GlobalISel legalizer:</p>
+<p>And that is basically what GlobalISel does: for each operation, we specify its legal types and the &ldquo;recipes&rdquo; for legalizing it <em>at the same place</em>.
+The interface to describe these information has a similar look to the <code>setOperationAction</code> function we&rsquo;ve seen previously in SelectionDAG ISel. Let&rsquo;s see an example from RISC-V&rsquo;s GlobalISel legalizer:</p>
 
 
 
