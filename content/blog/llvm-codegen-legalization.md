@@ -356,7 +356,8 @@ _Then why can't we just jump from Step (1) to Step (4)?_
 
 Why can't we **consolidate** type and operation legalization into a single stage?
 
-And that is basically what GlobalISel does: for each operation, the target specifies its type legality as well as necessary actions (e.g. expansion) to make it legal. This is expressed in a similar manner as the `setOperationAction` we've seen in SelectionDAG ISel. Let's look at an example from RISC-V GlobalISel legalizer:
+And that is basically what GlobalISel does: for each operation, we specify its legal types and the "recipes" for legalizing it _at the same place_.
+The interface to describe these information has a similar look to the `setOperationAction` function we've seen previously in SelectionDAG ISel. Let's see an example from RISC-V's GlobalISel legalizer:
 ```c
 getActionDefinitionsBuilder({G_ADD, G_SUB, G_AND, G_OR, G_XOR})
     .legalFor({s32, sXLen})
