@@ -1,4 +1,228 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Wed, 15 May 2024 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Legalizations in LLVM Backend</title><link>https://myhsu.xyz/llvm-codegen-legalization/</link><pubDate>Wed, 15 May 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-codegen-legalization/</guid><description>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code. While there are exceptions and corner cases, this holds in the majority of cases. Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively emulate those features.
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Mon, 05 Aug 2024 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Scheduling Model in LLVM - Part I</title><link>https://myhsu.xyz/llvm-sched-model-1/</link><pubDate>Mon, 05 Aug 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-model-1/</guid><description>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions. In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&amp;rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)1.</description><content:encoded><![CDATA[<p>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions.
+In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup>. Which makes it an important factor in performance tuning for low-level code.</p>
+<p>This series is about LLVM&rsquo;s scheduling model, how it interacts / affects other parts of LLVM and how can we fine tune this model for better performance. I&rsquo;ll cover how scheduling models are used in other part of LLVM in later posts, but in this one, I&rsquo;m focusing on the scheduling model itself first, and talk about how to specify scheduling information for individual instructions. Let&rsquo;s start with a really basic example.</p>
+<h3 id="the-basics">The Basics</h3>
+<p>Scheduling models are part of the target definition. They are associated with one or more target processors. Multiple processors can also share the same scheduling model. Take RISC-V as an example, we can find <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedSiFive7.td">one</a> of its scheduling models, <code>SiFive7Model</code>, covers a wide array of processors from <code>sifive-e76</code>, a 32-bit microcontroller, to <code>sifive-x280</code>, which is a high-performance processor designed for AI/ML workloads.</p>
+<p>To describe per-instruction scheduling information like latency, naively, we can express such information with descriptions like <em>&ldquo;opcode ADD has latency of X&rdquo;</em>. It&rsquo;s all fun and games until you realize that there are tens of thousands of opcodes in some of the targets<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup> so it doesn&rsquo;t scale well. More importantly, many instructions share the same scheduling characteristics.
+For example, simple arithmetic operations like add, sub, and shifts usually have the same latency in most modern architectures.</p>
+<p>Instead of spelling out per-opcode information, LLVM chooses a different path that characterizes an instruction&rsquo;s scheduling properties with <strong>operand reads and writes</strong>:
+First, each operand in an instruction is assigned with a &ldquo;token&rdquo;.</p>
+<p>Take the <a href="https://github.com/llvm/llvm-project/blob/e70f376b25ea96f3b0db75ff77ae1a58d53f2119/llvm/lib/Target/RISCV/RISCVInstrInfoM.td#L39">DIV instruction</a> in RISC-V shown below as an example, <code>WriteIDIV</code> is the token assigned to the first operand, which is also the destination register, hence a <em>write</em> operand (also called <strong>definition</strong>). The two <code>ReadIDIV</code> follow are tokens for the two source registers, both are <em>read</em> operands (or <strong>use</strong>).</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// From llvm/lib/Target/RISCV/RISCVInstrInfoM.td.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">DIV</span>     : ALU_rr<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">0b0000001</span>, <span style="color:#fab387">0b100</span>, <span style="color:#a6e3a1">&#34;div&#34;</span><span style="color:#89dceb;font-weight:bold">&gt;</span>,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>              Sched<span style="color:#89dceb;font-weight:bold">&lt;</span>[WriteIDiv, ReadIDiv, ReadIDiv]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>A write token is a <code>SchedWrite</code> TableGen instance, while a read token is a <code>SchedRead</code> instance.</p>
+<p>With these <code>SchedWrite</code> and <code>SchedRead</code> tokens, a scheduling model then assigns processor-specific information to them, like <em>latency</em> and the <em>hardware resources</em> they use.</p>
+<p>Take <code>SiFive7Model</code> we saw earlier as an example, in the file where the model is defined (i.e. <code>llvm/lib/Target/RISCV/RISCVSchedSiFive7.td</code>), we find this piece of snippet:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Integer division
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIDiv, [SiFive7PipeB, SiFive7IDiv]<span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let Latency <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">66</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>  let ReleaseAtCycles <span style="color:#89dceb;font-weight:bold">=</span> [<span style="color:#fab387">1</span>, <span style="color:#fab387">65</span>];
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>}</span></span></code></pre></div>
+<p>The <code>WriteRes</code> TableGen class<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup> takes a <code>SchedWrite</code> &ndash; in this case <code>WriteIDIV</code> &ndash; and assigns it three different kinds of information:</p>
+<ul>
+<li>Latency of 66 cycles</li>
+<li>The hardware resources it uses: <code>SiFive7PipeB</code> and <code>SiFive7IDiv</code></li>
+<li>The <code>ReleaseAtCycles</code> field specifies the number of cycles this instruction spends on each hardware resource it uses. In this case, <code>WriteIDIV</code> spends 1 cycle on <code>SiFive7PipeB</code> and 65 cycles on <code>SiFive7IDiv</code></li>
+</ul>
+<p>What about <code>ReadIDIV</code>, the <code>SchedRead</code> instances we saw earlier? By default, LLVM&rsquo;s scheduling model assumes that operand reads finish instantly, so a <code>SchedRead</code> cannot be assigned a latency property nor consuming any cycle the same way as a <code>SchedWrite</code>.</p>
+<p>Which means that effectively, write operands dictate the instruction&rsquo;s scheduling properties and it&rsquo;s expected to repersent majority of the changes an instruction makes to the processor states. So, it&rsquo;s safe to say that in this case, an <code>DIV</code> instruction has a latency of 66 cycles.</p>
+<p>Alright, so far we have covered the most basic part of a scheduling model, specifically on how to specify the scheduling information for an instruction. We can summarize it into three quick steps:</p>
+<ol>
+<li>Assigning <code>SchedRead</code> and <code>SchedWrite</code> to your instruction</li>
+<li>In your scheduling model, find the processor resources <code>SchedWrite</code> use&hellip;</li>
+<li>&hellip;and map those resources to <code>SchedWrite</code> using <code>WriteRes</code>, along with other info like latency.</li>
+</ol>
+<p>I have intentionally left many details aside, like what exactly is a hardware resource (e.g <code>SiFive7PipeB</code>). These details are strongly related to what we&rsquo;re going to cover in the next section: the <strong>microarchitecture</strong> of a processor.</p>
+<h3 id="modeling-microarchitecture">Modeling microarchitecture</h3>
+<p>Recall the goals of instruction scheduling are to minimize latency, maximize throughput, and eliminate as many potential hazards in the processor&rsquo;s pipeline as possible.
+These goals have a lot to do with how instructions <em>move</em> within the processor&rsquo;s pipeline. For instance, extra cycles might be spent on fulfilling RAW (Read after Write) data dependencies, or certain units, like an integer division unit, might be overwhelmed and stall the entire pipeline.</p>
+<p>And this is where the processor&rsquo;s microarchitecture comes into play. Specifically, we&rsquo;re focusing on <strong>superscalar</strong> architecture here, which has a typical structure shown below:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-basic-superscalar.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-basic-superscalar.light.svg">
+  </picture>
+</div>
+<p>The above structure has an issue width of 3, meaning it can feed at most 3 instructions to later stages at a time; micro-codes, or <em>uops</em>, are generated at the decode stage; at this moment we&rsquo;re a little hand-waving on the definition of dispatch and issue, as we&rsquo;ll see several of their variants later; there are three different <strong>functional units</strong> in the execution stage for integer, floating point, and memory instructions (load / store unit). All of them are fully pipelined.</p>
+<p>Despite the fact that scheduling model has strong connections with microarchitectures, we don&rsquo;t want our model to cover <em>too</em> many microarchitecture details &ndash; it&rsquo;s simply too expensive! What we want is a model that can raise red flags when we come up with a bad scheduling, yet abstract away all the nitty-gritty details and present just the information we care.</p>
+<p>&ldquo;What kind of red flags?&rdquo; you may ask. The most important thing is probably whether we have enough <em>resources</em> to even run an instruction. Remember, the whole idea of superscalar is to run instructions of different types in different function units <strong>in parallel</strong>: integer uops go into integer units and floating point uops go into another floating point unit, where these units can run independently.
+Each of these units has one or more <em>pipes</em> that actually run the uops. In many places &ldquo;functional units&rdquo; and &ldquo;pipes&rdquo; are interchangable.
+If there is no enough resource, we won&rsquo;t be able to <strong>dispatch</strong> an uop into any of the pipes. After all, processors have only a limited number of pipes for a specific type of instructions.</p>
+<p>Let&rsquo;s look at a concrete example: SiFive&rsquo;s P670 RISC-V processor.</p>
+<figure style="text-align: center;">
+  <img src="/images/p670-uarch.png">
+  <figcaption>Image source: <a href="https://www.cnx-software.com/2022/11/02/sifive-p670-and-p470-risc-v-processors-add-risc-v-vector-extensions/">CNX software</a></figcaption>
+</figure>
+<p>P670 is an out-of-order processor targeting consumer devices like smartphones. It has four integer pipes, two floating point pipes, and two vector units. And this is how integer pipes look like in its <a href="https://github.com/llvm/llvm-project/blob/e70f376b25ea96f3b0db75ff77ae1a58d53f2119/llvm/lib/Target/RISC/RISCVSchedSiFiveP600.td">scheduling model</a>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ0</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ1</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ2</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ3</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>...
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>def <span style="color:#89dceb">SiFiveP600IntArith</span>    : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[SiFiveP600IEXQ0, SiFiveP600IEXQ1, SiFiveP600IEXQ2, SiFiveP600IEXQ3]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>In LLVM, a <code>ProcResource</code> instance in TableGen represents a unit that can executes uops, hence an equivalent to a single pipe in most cases. Here, each integer pipe in P600 is represented by <code>SiFiveP600IEXQ[0-3]</code></p>
+<p>Nevertheless, it&rsquo;s not the only instance you can <em>dispatch</em> uops to, because sometimes you can dispatch uops into a collection of pipes in which <em>any</em> of the pipes in that group can execute the dispatched uop. Such groups are represented by <code>ProcResGroup</code> instances in TableGen, like the <code>SiFiveP600IntArith</code> we see above: when an instruction &ndash; like <code>ADD</code> who uses <code>WriteIALU</code> &ndash; <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedSiFiveP600.td#L104">consumes</a> a <code>SiFiveP600IntArith</code> shown in the snippet below, it means that such instruction can be dispatched to any of the <code>SiFiveP600IEXQ[0-3]</code>.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Integer arithmetic and logic
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIALU, [SiFiveP600IntArith]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>When there is no available pipe, a stall or a hazard occurs, in this case it is considered a <em>dispatch</em> hazard since you can&rsquo;t dispatch more instructions. To avoid such hazards, each pipe usually has a buffer or a queue to store a certain number of candidates. Knowing the <strong>size</strong> of that buffer is crucial to our scheduling model, because then we can make a wiser decision on distributing the instructions <em>evenly</em> across all pipes, rather than jamming them into a single one just like freeways in LA.</p>
+<p>Most<sup id="fnref:4"><a href="#fn:4" class="footnote-ref" role="doc-noteref">4</a></sup> processors with buffers / queues like this have a more well-known functionality: reordering instructions. In an our-of-order processor, each of these buffers is used as some sort of staging area for the scheduler to preemptively <strong>issue</strong> instructions with no dependencies on the others, in the hope of hiding latencies.</p>
+<p>Aside from the size of the buffer, how to <em>organize</em> these buffers (e.g. several pipes might share a buffer) is just as important as their sizes. In the next section, we&rsquo;re gonna go through processor resource buffers of different sizes and layouts.</p>
+<h4 id="processor-resource-buffers">Processor resource buffers</h4>
+<p>Let&rsquo;s sort out some terminologies first. The buffer, or <strong>scheduler queue</strong> we&rsquo;re talking about here, is often known as a <strong>reservation station</strong> too.
+Reservation station stores instructions whose <em>operands</em> might not be ready yet, until those operands are available. <strong>Reorder buffer (ROB)</strong>, on the other hand, is a kind of unit with slightly confusing name. ROB reorders the <em>results</em> of an instruction; it&rsquo;s usually depicted at the end of the execution stage, as shown in the previous diagram. Nevertheless, we need to reserve a slot in the ROB <em>before</em> we can even dispatch an instruction, therefore, to some extent, the size of ROB also controls how many instructions are allowed into the execution stage.</p>
+<p>Back to the buffers, in LLVM&rsquo;s scheduling model, we use the <code>BufferSize</code> field in a <code>ProcessorResource</code> or a <code>ProcResGroup</code> instance to specify the size of the associated buffer.
+Special values are also used to denote unconventional buffer layouts, or even the <em>absent</em> of buffers.</p>
+<p>LLVM currently supports 4 different kinds of buffer layouts: decoupled reservation stations, unified reservation station, in-order core, and latency device. Let&rsquo;s go through each of them now.</p>
+<h5 id="decoupled-reservation-stations">Decoupled reservation stations</h5>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-decoupled-reservation-stations.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-decoupled-reservation-stations.light.svg">
+  </picture>
+</div>
+<p>When we assign a <strong>positive</strong> <code>BufferSize</code> to individual processor resources or processor resource groups, we&rsquo;re modeling processor resources with their own scheduler queues. Here is an example from PowerPC POWER9&rsquo;s <a href="https://github.com/llvm/llvm-project/blob/22c06aa5e94e30fb1333ecaf46ce33c65d148634/llvm/lib/Target/PowerPC/PPCScheduleP9.td#L123">scheduling model</a>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Only one Branch unit.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">BR</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">16</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>}</span></span></code></pre></div>
+<p>Here, the execution unit for branch instructions has its own scheduler and it has 16 entries in its buffer.</p>
+<p>A more common arrangement is assigning <code>BufferSize</code> on a processor resource <em>group</em>.
+For instance, in AMD Zen2 CPU, there are total of 4 general integer execution units with their own schedulers; each scheduler has 16 buffer entries.</p>
+<figure style="text-align: center;">
+  <img src="/images/zen2-uarch.svg">
+  <figcaption>Image source: <a href="https://en.wikichip.org/wiki/amd/microarchitectures/zen_2">Wiki Chip</a></figcaption>
+</figure>
+<p>In Zen2&rsquo;s LLVM scheduling model, these schedulers are represented by 4 <code>ProcessorResource</code> instances: <code>Zn2ALU[0-3]</code>.
+Despite the fact that there are 4 separate schedulers in real hardware, Zen2&rsquo; scheduling model doesn&rsquo;t assign <code>BufferSize = 16</code> to each <code>Zn2ALU[0-3]</code> instance, but instead group all 4 instances into a single <code>ProcResGroup</code> called <code>Zn2ALU</code> and <a href="https://github.com/llvm/llvm-project/blob/22c06aa5e94e30fb1333ecaf46ce33c65d148634/llvm/lib/Target/X86/X86ScheduleZnver2.td#L75">assign</a> a buffer size of 16 * 4:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// 64 Entry (16x4 entries) Int Scheduler
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">Zn2ALU</span> : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[Zn2ALU0, Zn2ALU1, Zn2ALU2, Zn2ALU3]<span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let BufferSize<span style="color:#89dceb;font-weight:bold">=</span><span style="color:#fab387">64</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>}</span></span></code></pre></div>
+<p>The rationale behind this is that most integer instructions map <code>Zn2ALU</code>, rather than a specific <code>Zn2ALU[0-3]</code>, to their <code>SchedWrite</code> token. Because similar to the SiFive P600 example we&rsquo;ve seen earlier, these instructions simply don&rsquo;t care which <code>Zn2ALU[0-3]</code> they are going to run on. Therefore, it makes more sense to specify the buffer size on the processor resource group.</p>
+<h5 id="unified-reservation-station">Unified reservation station</h5>
+<p>By default, <code>BufferSize</code> is set to <strong>-1</strong>, representing a layout where all the processor resources effectively share the same buffer as illustrated in the diagram below.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-unified-reservation-station.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-unified-reservation-station.light.svg">
+  </picture>
+</div>
+<p>In this case, the actual size of such buffer is dictated by <code>MicroOpBufferSize</code>, which is a global attribute to the entire scheduling model rather than individual processor resource:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">SiFiveP600Model</span> : SchedMachineModel {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  let IssueWidth <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">4</span>;         <span style="color:#6c7086;font-style:italic">// 4 micro-ops are dispatched per cycle.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span><span style="color:#6c7086;font-style:italic"></span>  let MicroOpBufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">160</span>; <span style="color:#6c7086;font-style:italic">// Max micro-ops that can be buffered.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span><span style="color:#6c7086;font-style:italic"></span>  ...
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>}</span></span></code></pre></div>
+<p>This <code>MicroOpBufferSize</code> attribute is primarily used to throttle the number of uops to be <em>dispatched</em>. There are, however, many factors that control this throttle at the same time. Notably, ROB and register renaming. We&rsquo;ve explained the effect of ROB earlier; for register renaming, if there aren&rsquo;t enough physical registers for us to rename, a dispatch hazard also occurs. Consequently, the value of <code>MicroOpBufferSize</code> should be the minimal of reorder buffer size, size of register renaming pool, and the actual size of unified reservation station.</p>
+<h5 id="in-order-core">In-order core</h5>
+<p>So far we have been discussing out-of-order cores, which is one of the primary reasons why we need buffers in the first place. But in-order cores are still a thing, because it dramatically simplifies the chip design and reduces the area, which are top on the list for products like embedded devices. It&rsquo;s also getting more popular in cases where you want save areas for specialized units like BIG vector units or even matrix multiplication units. SiFive&rsquo;s X280, which we&rsquo;ve seen its scheduling model previously, and X390 are good examples, where they save area by adopting in-order design and enjoying a whopping 512- and 1024-bit vector, respectively.</p>
+<p>For in-order cores, you simply set <code>BufferSize</code> and <code>MicroOpBufferSize</code> mentioned earlier to <strong>zero</strong>.
+When an uop is handed to an in-order unit in LLVM&rsquo;s scheduling model, <em>dispatch</em> and <em>issue</em> are conisdered happening at the same time.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-in-order.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-in-order.light.svg">
+  </picture>
+</div>
+<p>The uop then holds the processor resource until <code>ReleaseAtCycle</code> before another uop can be dispatched. In other words, the younger uop would encounter a dispatch hazard until <code>ReleaseAtCycle</code> has passed in the older uop.</p>
+<h5 id="latency-device">Latency device</h5>
+<p>When <code>BufferSize</code> equals to 1, we create a unique kind of resource known as latency device. Resources of this kind act just like an in-order pipeline, except two things:</p>
+<ol>
+<li>Since there is still a buffer, albiet being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.</li>
+<li>LLVM&rsquo;s instruction scheduler always treats two adjacent uops that use this resource as producer and consumer (even if there is no data dependency between them). Meaning, the younger uop always waits <code>Latency</code> cycles after the old uop was issued &ndash; as opposed to waiting until <code>ReleaseAtCycle</code> has passed in a normal in-order pipeline &ndash; before it can be issued.</li>
+</ol>
+<p>This kind of resource was designed to model in-order units within an out-of-order core. It&rsquo;s most commonly used for modeling <strong>un-pipelined</strong> units nowadays (which, of course, is in-order). Yes, it&rsquo;s 2024 and there are still computations that are difficult to be pipelined, most notably integer &ndash; sometimes even floating point &ndash; <em>divisions</em>. It is possible to make integer divisions pipelined, but many of the times it&rsquo;s not worth the chip area.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-latency-device.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-latency-device.light.svg">
+  </picture>
+</div>
+<p>Some examples: Samsung Exynos M5&rsquo;s serialized (i.e. un-pipelined) integer division unit, represented by <code>M5UnitD</code> from <a href="https://github.com/llvm/llvm-project/blob/5262865aac683b72f3e66de7a122e0c455ab6b9b/llvm/lib/Target/AArch64/AArch64SchedExynosM5.td#L41">here</a>, has a buffer size of 1:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>let Super <span style="color:#89dceb;font-weight:bold">=</span>  M5UnitC, BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">1</span> in
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">M5UnitD</span>  : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// Integer division (inside C0, serialized)
+</span></span></span></code></pre></div>
+<p>RISC-V&rsquo;s Rocket chip <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedRocket.td#L41">marks</a> their integer and floating point division units, <code>RocketUnitIDiv</code> and <code>RocketUnitFPDivSqrt</code>, as latency devices too:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>let BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">1</span> in {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">RocketUnitIDiv</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// Int Division
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">RocketUnitFPDivSqrt</span>  : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// FP Divide/Sqrt
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span><span style="color:#6c7086;font-style:italic"></span>}</span></span></code></pre></div>
+<h3 id="epilogue">Epilogue</h3>
+<p>In this post, I went through the basics of LLVM&rsquo;s scheduling model and show how to specify the scheduling information for individual instructions. On top of that, I explained different kinds of processor resource buffers and their use cases.</p>
+<p>In the next post, I will talk about <em>how</em> exactly these resource buffer kinds and latency are used in LLVM&rsquo;s instruction scheduler and LLVM MCA, as well as their performance impact on the generated code. Which helps us to make a better decision on designing new scheduling models.</p>
+<div class="footnotes" role="doc-endnotes">
+<hr>
+<ol>
+<li id="fn:1">
+<p>It should have been used in more places like instruction selection and cost models in the middle end, but that&rsquo;s a story for another day.&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:2">
+<p>Interestingly, RISC-V has one of the biggest sets of opcodes. A large portion of them are pseudo instructions for RVV.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:3">
+<p>Using <code>WriteRes</code> is not the only way to connect <code>SchedWrite</code> with processor resources. I might talk about an alternative that involves <code>InstRW</code> and <code>SchedWriteRes</code> in future posts.&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:4">
+<p>Superscalar and out-of-order-ness are two independent concepts. Superscalar is about increasing the &ldquo;width&rdquo; of your execution units; out-of-order is about the order of executions. You can have in-order superscalar processors, which are pretty common, as well as out-of-order non-superscalar processors, which barely exist but no one can stop you from making it.&#160;<a href="#fnref:4" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+</ol>
+</div>
+]]></content:encoded></item><item><title>Legalizations in LLVM Backend</title><link>https://myhsu.xyz/llvm-codegen-legalization/</link><pubDate>Wed, 15 May 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-codegen-legalization/</guid><description>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code. While there are exceptions and corner cases, this holds in the majority of cases. Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively emulate those features.
 This might sound a little distant to our typical software development experiences, but I&amp;rsquo;m not even talking about a problem that only happens on some exotic proprietary ML accelerator whatnots.</description><content:encoded><![CDATA[<p>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
 While there are exceptions and corner cases, this holds in the majority of cases.
 Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively <em>emulate</em> those
