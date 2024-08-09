@@ -37,7 +37,7 @@ title = "Min Hsu's Homepage"
 description = "Min-Yih \"Min\" Hsu's Personal Website"
 dateFormat = "2006-01-02"
 hideMadeWithLine = false
-hideRSSLink = true
+hideRSSLink = false
 [params.author]
 name = "Min-Yih Hsu"
 email = "min@myhsu.dev"
@@ -68,7 +68,6 @@ weight = 40
 #limit = 42
 
 [outputs]
-# Generate RSS for home only.
-section = ["html"]
+section = ["html", "rss"]
 taxonomy = ["html"]
 term = ["html"]
