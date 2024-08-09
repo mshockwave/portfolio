@@ -28,7 +28,7 @@ legalization happens around one of the earlier events, the instruction selection
 
 [^3]: At the time of writing, the codegen pipeline hasn't migrated to using the _new_ PassManager yet, while the middle-end had wrapped up the migration years ago.
 
-Several different ISel stratgies co-existing in LLVM at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemneted by every targets.
+Several different ISel stratgies co-existing in LLVM at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemented by every targets.
 This ISel turns instrutions in each basic block into a DAG, different from the "linear" representation of instructions as we seen in LLVM IR.
 
 We can roughly divide SelectionDAG ISel further into 4 steps, they are:

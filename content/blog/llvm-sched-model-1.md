@@ -190,7 +190,7 @@ The uop then holds the processor resource until `ReleaseAtCycle` before another 
 
 ##### Latency device
 When `BufferSize` equals to 1, we create a unique kind of resource known as latency device. Resources of this kind act just like an in-order pipeline, except two things:
-  1. Since there is still a buffer, albiet being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.
+  1. Since there is still a buffer, albeit being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.
   2. LLVM's instruction scheduler always treats two adjacent uops that use this resource as producer and consumer (even if there is no data dependency between them). Meaning, the younger uop always waits `Latency` cycles after the old uop was issued -- as opposed to waiting until `ReleaseAtCycle` has passed in a normal in-order pipeline -- before it can be issued.
 
 This kind of resource was designed to model in-order units within an out-of-order core. It's most commonly used for modeling **un-pipelined** units nowadays (which, of course, is in-order). Yes, it's 2024 and there are still computations that are difficult to be pipelined, most notably integer -- sometimes even floating point -- _divisions_. It is possible to make integer divisions pipelined, but many of the times it's not worth the chip area.
