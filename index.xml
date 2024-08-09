@@ -171,7 +171,7 @@ When an uop is handed to an in-order unit in LLVM&rsquo;s scheduling model, <em>
 <h5 id="latency-device">Latency device</h5>
 <p>When <code>BufferSize</code> equals to 1, we create a unique kind of resource known as latency device. Resources of this kind act just like an in-order pipeline, except two things:</p>
 <ol>
-<li>Since there is still a buffer, albiet being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.</li>
+<li>Since there is still a buffer, albeit being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.</li>
 <li>LLVM&rsquo;s instruction scheduler always treats two adjacent uops that use this resource as producer and consumer (even if there is no data dependency between them). Meaning, the younger uop always waits <code>Latency</code> cycles after the old uop was issued &ndash; as opposed to waiting until <code>ReleaseAtCycle</code> has passed in a normal in-order pipeline &ndash; before it can be issued.</li>
 </ol>
 <p>This kind of resource was designed to model in-order units within an out-of-order core. It&rsquo;s most commonly used for modeling <strong>un-pipelined</strong> units nowadays (which, of course, is in-order). Yes, it&rsquo;s 2024 and there are still computations that are difficult to be pipelined, most notably integer &ndash; sometimes even floating point &ndash; <em>divisions</em>. It is possible to make integer divisions pipelined, but many of the times it&rsquo;s not worth the chip area.</p>
@@ -237,7 +237,7 @@ In this post, I&rsquo;m going to give an overview on how it works.</p>
 <h3 id="a-sneak-peek-into-selectiondag-isel">A sneak peek into SelectionDAG ISel</h3>
 <p>LLVM&rsquo;s codegen pipeline in the backend is consisted of LLVM Passes, same as the middle-end<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup>. This long long pipeline is usually partitioned by important events like register allocation and instruction scheduling, and the
 legalization happens around one of the earlier events, the instruction selection (ISel).</p>
-<p>Several different ISel stratgies co-existing in LLVM at this moment. Here, we&rsquo;re focusing on <strong>SelectionDAG ISel</strong> first, which is the primary one implemneted by every targets.
+<p>Several different ISel stratgies co-existing in LLVM at this moment. Here, we&rsquo;re focusing on <strong>SelectionDAG ISel</strong> first, which is the primary one implemented by every targets.
 This ISel turns instrutions in each basic block into a DAG, different from the &ldquo;linear&rdquo; representation of instructions as we seen in LLVM IR.</p>
 <p>We can roughly divide SelectionDAG ISel further into 4 steps, they are:</p>
 <ol>
