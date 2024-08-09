@@ -7,7 +7,9 @@ This might sound a little distant to our typical software development experience
 <a href=/publications/>Publications</a>
 <a href=/blog/>Blog</a>
 <a href=https://github.com/mshockwave>GitHub</a>
-<a href=https://www.linkedin.com/in/bekketmcclane/>LinkedIn</a></nav><h1>Legalizations in LLVM Backend</h1></header><main><p><i><time datetime=2024-05-15 pubdate>2024-05-15</time></i></p><content><p>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
+<a href=https://www.linkedin.com/in/bekketmcclane/>LinkedIn</a>
+<a href=/index.xml><svg xmlns="http://www.w3.org/2000/svg" class="icon" viewBox="0 0 448 512"><path d="M0 64C0 46.3 14.3 32 32 32c229.8.0 416 186.2 416 416 0 17.7-14.3 32-32 32s-32-14.3-32-32C384 253.6 226.4 96 32 96 14.3 96 0 81.7.0 64zM0 416a64 64 0 11128 0A64 64 0 110 416zM32 160c159.1.0 288 128.9 288 288 0 17.7-14.3 32-32 32s-32-14.3-32-32c0-123.7-100.3-224-224-224-17.7.0-32-14.3-32-32s14.3-32 32-32z"/></svg>
+RSS</a></nav><h1>Legalizations in LLVM Backend</h1></header><main><p><i><time datetime=2024-05-15 pubdate>2024-05-15</time></i></p><content><p>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
 While there are exceptions and corner cases, this holds in the majority of cases.
 Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively <em>emulate</em> those
 features.</p><p>This might sound a little distant to our typical software development experiences, but I&rsquo;m not even talking about a problem that only happens on some exotic proprietary ML accelerator whatnots. There is a good

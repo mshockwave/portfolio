@@ -1,0 +1,689 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/blog/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Mon, 05 Aug 2024 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/blog/index.xml" rel="self" type="application/rss+xml"/><item><title>Scheduling Model in LLVM - Part I</title><link>https://myhsu.xyz/llvm-sched-model-1/</link><pubDate>Mon, 05 Aug 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-model-1/</guid><description>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions. In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&amp;rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)1.</description><content:encoded><![CDATA[<p>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions.
+In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup>. Which makes it an important factor in performance tuning for low-level code.</p>
+<p>This series is about LLVM&rsquo;s scheduling model, how it interacts / affects other parts of LLVM and how can we fine tune this model for better performance. I&rsquo;ll cover how scheduling models are used in other part of LLVM in later posts, but in this one, I&rsquo;m focusing on the scheduling model itself first, and talk about how to specify scheduling information for individual instructions. Let&rsquo;s start with a really basic example.</p>
+<h3 id="the-basics">The Basics</h3>
+<p>Scheduling models are part of the target definition. They are associated with one or more target processors. Multiple processors can also share the same scheduling model. Take RISC-V as an example, we can find <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedSiFive7.td">one</a> of its scheduling models, <code>SiFive7Model</code>, covers a wide array of processors from <code>sifive-e76</code>, a 32-bit microcontroller, to <code>sifive-x280</code>, which is a high-performance processor designed for AI/ML workloads.</p>
+<p>To describe per-instruction scheduling information like latency, naively, we can express such information with descriptions like <em>&ldquo;opcode ADD has latency of X&rdquo;</em>. It&rsquo;s all fun and games until you realize that there are tens of thousands of opcodes in some of the targets<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup> so it doesn&rsquo;t scale well. More importantly, many instructions share the same scheduling characteristics.
+For example, simple arithmetic operations like add, sub, and shifts usually have the same latency in most modern architectures.</p>
+<p>Instead of spelling out per-opcode information, LLVM chooses a different path that characterizes an instruction&rsquo;s scheduling properties with <strong>operand reads and writes</strong>:
+First, each operand in an instruction is assigned with a &ldquo;token&rdquo;.</p>
+<p>Take the <a href="https://github.com/llvm/llvm-project/blob/e70f376b25ea96f3b0db75ff77ae1a58d53f2119/llvm/lib/Target/RISCV/RISCVInstrInfoM.td#L39">DIV instruction</a> in RISC-V shown below as an example, <code>WriteIDIV</code> is the token assigned to the first operand, which is also the destination register, hence a <em>write</em> operand (also called <strong>definition</strong>). The two <code>ReadIDIV</code> follow are tokens for the two source registers, both are <em>read</em> operands (or <strong>use</strong>).</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// From llvm/lib/Target/RISCV/RISCVInstrInfoM.td.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">DIV</span>     : ALU_rr<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">0b0000001</span>, <span style="color:#fab387">0b100</span>, <span style="color:#a6e3a1">&#34;div&#34;</span><span style="color:#89dceb;font-weight:bold">&gt;</span>,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>              Sched<span style="color:#89dceb;font-weight:bold">&lt;</span>[WriteIDiv, ReadIDiv, ReadIDiv]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>A write token is a <code>SchedWrite</code> TableGen instance, while a read token is a <code>SchedRead</code> instance.</p>
+<p>With these <code>SchedWrite</code> and <code>SchedRead</code> tokens, a scheduling model then assigns processor-specific information to them, like <em>latency</em> and the <em>hardware resources</em> they use.</p>
+<p>Take <code>SiFive7Model</code> we saw earlier as an example, in the file where the model is defined (i.e. <code>llvm/lib/Target/RISCV/RISCVSchedSiFive7.td</code>), we find this piece of snippet:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Integer division
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIDiv, [SiFive7PipeB, SiFive7IDiv]<span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let Latency <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">66</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>  let ReleaseAtCycles <span style="color:#89dceb;font-weight:bold">=</span> [<span style="color:#fab387">1</span>, <span style="color:#fab387">65</span>];
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>}</span></span></code></pre></div>
+<p>The <code>WriteRes</code> TableGen class<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup> takes a <code>SchedWrite</code> &ndash; in this case <code>WriteIDIV</code> &ndash; and assigns it three different kinds of information:</p>
+<ul>
+<li>Latency of 66 cycles</li>
+<li>The hardware resources it uses: <code>SiFive7PipeB</code> and <code>SiFive7IDiv</code></li>
+<li>The <code>ReleaseAtCycles</code> field specifies the number of cycles this instruction spends on each hardware resource it uses. In this case, <code>WriteIDIV</code> spends 1 cycle on <code>SiFive7PipeB</code> and 65 cycles on <code>SiFive7IDiv</code></li>
+</ul>
+<p>What about <code>ReadIDIV</code>, the <code>SchedRead</code> instances we saw earlier? By default, LLVM&rsquo;s scheduling model assumes that operand reads finish instantly, so a <code>SchedRead</code> cannot be assigned a latency property nor consuming any cycle the same way as a <code>SchedWrite</code>.</p>
+<p>Which means that effectively, write operands dictate the instruction&rsquo;s scheduling properties and it&rsquo;s expected to repersent majority of the changes an instruction makes to the processor states. So, it&rsquo;s safe to say that in this case, an <code>DIV</code> instruction has a latency of 66 cycles.</p>
+<p>Alright, so far we have covered the most basic part of a scheduling model, specifically on how to specify the scheduling information for an instruction. We can summarize it into three quick steps:</p>
+<ol>
+<li>Assigning <code>SchedRead</code> and <code>SchedWrite</code> to your instruction</li>
+<li>In your scheduling model, find the processor resources <code>SchedWrite</code> use&hellip;</li>
+<li>&hellip;and map those resources to <code>SchedWrite</code> using <code>WriteRes</code>, along with other info like latency.</li>
+</ol>
+<p>I have intentionally left many details aside, like what exactly is a hardware resource (e.g <code>SiFive7PipeB</code>). These details are strongly related to what we&rsquo;re going to cover in the next section: the <strong>microarchitecture</strong> of a processor.</p>
+<h3 id="modeling-microarchitecture">Modeling microarchitecture</h3>
+<p>Recall the goals of instruction scheduling are to minimize latency, maximize throughput, and eliminate as many potential hazards in the processor&rsquo;s pipeline as possible.
+These goals have a lot to do with how instructions <em>move</em> within the processor&rsquo;s pipeline. For instance, extra cycles might be spent on fulfilling RAW (Read after Write) data dependencies, or certain units, like an integer division unit, might be overwhelmed and stall the entire pipeline.</p>
+<p>And this is where the processor&rsquo;s microarchitecture comes into play. Specifically, we&rsquo;re focusing on <strong>superscalar</strong> architecture here, which has a typical structure shown below:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-basic-superscalar.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-basic-superscalar.light.svg">
+  </picture>
+</div>
+<p>The above structure has an issue width of 3, meaning it can feed at most 3 instructions to later stages at a time; micro-codes, or <em>uops</em>, are generated at the decode stage; at this moment we&rsquo;re a little hand-waving on the definition of dispatch and issue, as we&rsquo;ll see several of their variants later; there are three different <strong>functional units</strong> in the execution stage for integer, floating point, and memory instructions (load / store unit). All of them are fully pipelined.</p>
+<p>Despite the fact that scheduling model has strong connections with microarchitectures, we don&rsquo;t want our model to cover <em>too</em> many microarchitecture details &ndash; it&rsquo;s simply too expensive! What we want is a model that can raise red flags when we come up with a bad scheduling, yet abstract away all the nitty-gritty details and present just the information we care.</p>
+<p>&ldquo;What kind of red flags?&rdquo; you may ask. The most important thing is probably whether we have enough <em>resources</em> to even run an instruction. Remember, the whole idea of superscalar is to run instructions of different types in different function units <strong>in parallel</strong>: integer uops go into integer units and floating point uops go into another floating point unit, where these units can run independently.
+Each of these units has one or more <em>pipes</em> that actually run the uops. In many places &ldquo;functional units&rdquo; and &ldquo;pipes&rdquo; are interchangable.
+If there is no enough resource, we won&rsquo;t be able to <strong>dispatch</strong> an uop into any of the pipes. After all, processors have only a limited number of pipes for a specific type of instructions.</p>
+<p>Let&rsquo;s look at a concrete example: SiFive&rsquo;s P670 RISC-V processor.</p>
+<figure style="text-align: center;">
+  <img src="/images/p670-uarch.png">
+  <figcaption>Image source: <a href="https://www.cnx-software.com/2022/11/02/sifive-p670-and-p470-risc-v-processors-add-risc-v-vector-extensions/">CNX software</a></figcaption>
+</figure>
+<p>P670 is an out-of-order processor targeting consumer devices like smartphones. It has four integer pipes, two floating point pipes, and two vector units. And this is how integer pipes look like in its <a href="https://github.com/llvm/llvm-project/blob/e70f376b25ea96f3b0db75ff77ae1a58d53f2119/llvm/lib/Target/RISC/RISCVSchedSiFiveP600.td">scheduling model</a>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ0</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ1</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ2</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>def <span style="color:#89dceb">SiFiveP600IEXQ3</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>...
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>def <span style="color:#89dceb">SiFiveP600IntArith</span>    : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[SiFiveP600IEXQ0, SiFiveP600IEXQ1, SiFiveP600IEXQ2, SiFiveP600IEXQ3]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>In LLVM, a <code>ProcResource</code> instance in TableGen represents a unit that can executes uops, hence an equivalent to a single pipe in most cases. Here, each integer pipe in P600 is represented by <code>SiFiveP600IEXQ[0-3]</code></p>
+<p>Nevertheless, it&rsquo;s not the only instance you can <em>dispatch</em> uops to, because sometimes you can dispatch uops into a collection of pipes in which <em>any</em> of the pipes in that group can execute the dispatched uop. Such groups are represented by <code>ProcResGroup</code> instances in TableGen, like the <code>SiFiveP600IntArith</code> we see above: when an instruction &ndash; like <code>ADD</code> who uses <code>WriteIALU</code> &ndash; <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedSiFiveP600.td#L104">consumes</a> a <code>SiFiveP600IntArith</code> shown in the snippet below, it means that such instruction can be dispatched to any of the <code>SiFiveP600IEXQ[0-3]</code>.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Integer arithmetic and logic
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIALU, [SiFiveP600IntArith]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>When there is no available pipe, a stall or a hazard occurs, in this case it is considered a <em>dispatch</em> hazard since you can&rsquo;t dispatch more instructions. To avoid such hazards, each pipe usually has a buffer or a queue to store a certain number of candidates. Knowing the <strong>size</strong> of that buffer is crucial to our scheduling model, because then we can make a wiser decision on distributing the instructions <em>evenly</em> across all pipes, rather than jamming them into a single one just like freeways in LA.</p>
+<p>Most<sup id="fnref:4"><a href="#fn:4" class="footnote-ref" role="doc-noteref">4</a></sup> processors with buffers / queues like this have a more well-known functionality: reordering instructions. In an our-of-order processor, each of these buffers is used as some sort of staging area for the scheduler to preemptively <strong>issue</strong> instructions with no dependencies on the others, in the hope of hiding latencies.</p>
+<p>Aside from the size of the buffer, how to <em>organize</em> these buffers (e.g. several pipes might share a buffer) is just as important as their sizes. In the next section, we&rsquo;re gonna go through processor resource buffers of different sizes and layouts.</p>
+<h4 id="processor-resource-buffers">Processor resource buffers</h4>
+<p>Let&rsquo;s sort out some terminologies first. The buffer, or <strong>scheduler queue</strong> we&rsquo;re talking about here, is often known as a <strong>reservation station</strong> too.
+Reservation station stores instructions whose <em>operands</em> might not be ready yet, until those operands are available. <strong>Reorder buffer (ROB)</strong>, on the other hand, is a kind of unit with slightly confusing name. ROB reorders the <em>results</em> of an instruction; it&rsquo;s usually depicted at the end of the execution stage, as shown in the previous diagram. Nevertheless, we need to reserve a slot in the ROB <em>before</em> we can even dispatch an instruction, therefore, to some extent, the size of ROB also controls how many instructions are allowed into the execution stage.</p>
+<p>Back to the buffers, in LLVM&rsquo;s scheduling model, we use the <code>BufferSize</code> field in a <code>ProcessorResource</code> or a <code>ProcResGroup</code> instance to specify the size of the associated buffer.
+Special values are also used to denote unconventional buffer layouts, or even the <em>absent</em> of buffers.</p>
+<p>LLVM currently supports 4 different kinds of buffer layouts: decoupled reservation stations, unified reservation station, in-order core, and latency device. Let&rsquo;s go through each of them now.</p>
+<h5 id="decoupled-reservation-stations">Decoupled reservation stations</h5>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-decoupled-reservation-stations.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-decoupled-reservation-stations.light.svg">
+  </picture>
+</div>
+<p>When we assign a <strong>positive</strong> <code>BufferSize</code> to individual processor resources or processor resource groups, we&rsquo;re modeling processor resources with their own scheduler queues. Here is an example from PowerPC POWER9&rsquo;s <a href="https://github.com/llvm/llvm-project/blob/22c06aa5e94e30fb1333ecaf46ce33c65d148634/llvm/lib/Target/PowerPC/PPCScheduleP9.td#L123">scheduling model</a>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Only one Branch unit.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">BR</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">16</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>}</span></span></code></pre></div>
+<p>Here, the execution unit for branch instructions has its own scheduler and it has 16 entries in its buffer.</p>
+<p>A more common arrangement is assigning <code>BufferSize</code> on a processor resource <em>group</em>.
+For instance, in AMD Zen2 CPU, there are total of 4 general integer execution units with their own schedulers; each scheduler has 16 buffer entries.</p>
+<figure style="text-align: center;">
+  <img src="/images/zen2-uarch.svg">
+  <figcaption>Image source: <a href="https://en.wikichip.org/wiki/amd/microarchitectures/zen_2">Wiki Chip</a></figcaption>
+</figure>
+<p>In Zen2&rsquo;s LLVM scheduling model, these schedulers are represented by 4 <code>ProcessorResource</code> instances: <code>Zn2ALU[0-3]</code>.
+Despite the fact that there are 4 separate schedulers in real hardware, Zen2&rsquo; scheduling model doesn&rsquo;t assign <code>BufferSize = 16</code> to each <code>Zn2ALU[0-3]</code> instance, but instead group all 4 instances into a single <code>ProcResGroup</code> called <code>Zn2ALU</code> and <a href="https://github.com/llvm/llvm-project/blob/22c06aa5e94e30fb1333ecaf46ce33c65d148634/llvm/lib/Target/X86/X86ScheduleZnver2.td#L75">assign</a> a buffer size of 16 * 4:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// 64 Entry (16x4 entries) Int Scheduler
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">Zn2ALU</span> : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[Zn2ALU0, Zn2ALU1, Zn2ALU2, Zn2ALU3]<span style="color:#89dceb;font-weight:bold">&gt;</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  let BufferSize<span style="color:#89dceb;font-weight:bold">=</span><span style="color:#fab387">64</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>}</span></span></code></pre></div>
+<p>The rationale behind this is that most integer instructions map <code>Zn2ALU</code>, rather than a specific <code>Zn2ALU[0-3]</code>, to their <code>SchedWrite</code> token. Because similar to the SiFive P600 example we&rsquo;ve seen earlier, these instructions simply don&rsquo;t care which <code>Zn2ALU[0-3]</code> they are going to run on. Therefore, it makes more sense to specify the buffer size on the processor resource group.</p>
+<h5 id="unified-reservation-station">Unified reservation station</h5>
+<p>By default, <code>BufferSize</code> is set to <strong>-1</strong>, representing a layout where all the processor resources effectively share the same buffer as illustrated in the diagram below.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-unified-reservation-station.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-unified-reservation-station.light.svg">
+  </picture>
+</div>
+<p>In this case, the actual size of such buffer is dictated by <code>MicroOpBufferSize</code>, which is a global attribute to the entire scheduling model rather than individual processor resource:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">SiFiveP600Model</span> : SchedMachineModel {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  let IssueWidth <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">4</span>;         <span style="color:#6c7086;font-style:italic">// 4 micro-ops are dispatched per cycle.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span><span style="color:#6c7086;font-style:italic"></span>  let MicroOpBufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">160</span>; <span style="color:#6c7086;font-style:italic">// Max micro-ops that can be buffered.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span><span style="color:#6c7086;font-style:italic"></span>  ...
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>}</span></span></code></pre></div>
+<p>This <code>MicroOpBufferSize</code> attribute is primarily used to throttle the number of uops to be <em>dispatched</em>. There are, however, many factors that control this throttle at the same time. Notably, ROB and register renaming. We&rsquo;ve explained the effect of ROB earlier; for register renaming, if there aren&rsquo;t enough physical registers for us to rename, a dispatch hazard also occurs. Consequently, the value of <code>MicroOpBufferSize</code> should be the minimal of reorder buffer size, size of register renaming pool, and the actual size of unified reservation station.</p>
+<h5 id="in-order-core">In-order core</h5>
+<p>So far we have been discussing out-of-order cores, which is one of the primary reasons why we need buffers in the first place. But in-order cores are still a thing, because it dramatically simplifies the chip design and reduces the area, which are top on the list for products like embedded devices. It&rsquo;s also getting more popular in cases where you want save areas for specialized units like BIG vector units or even matrix multiplication units. SiFive&rsquo;s X280, which we&rsquo;ve seen its scheduling model previously, and X390 are good examples, where they save area by adopting in-order design and enjoying a whopping 512- and 1024-bit vector, respectively.</p>
+<p>For in-order cores, you simply set <code>BufferSize</code> and <code>MicroOpBufferSize</code> mentioned earlier to <strong>zero</strong>.
+When an uop is handed to an in-order unit in LLVM&rsquo;s scheduling model, <em>dispatch</em> and <em>issue</em> are conisdered happening at the same time.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-in-order.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-in-order.light.svg">
+  </picture>
+</div>
+<p>The uop then holds the processor resource until <code>ReleaseAtCycle</code> before another uop can be dispatched. In other words, the younger uop would encounter a dispatch hazard until <code>ReleaseAtCycle</code> has passed in the older uop.</p>
+<h5 id="latency-device">Latency device</h5>
+<p>When <code>BufferSize</code> equals to 1, we create a unique kind of resource known as latency device. Resources of this kind act just like an in-order pipeline, except two things:</p>
+<ol>
+<li>Since there is still a buffer, albeit being a really small one, a younger uop waits in the buffer until the older uop finishes, rather than encounters a dispatch hazard.</li>
+<li>LLVM&rsquo;s instruction scheduler always treats two adjacent uops that use this resource as producer and consumer (even if there is no data dependency between them). Meaning, the younger uop always waits <code>Latency</code> cycles after the old uop was issued &ndash; as opposed to waiting until <code>ReleaseAtCycle</code> has passed in a normal in-order pipeline &ndash; before it can be issued.</li>
+</ol>
+<p>This kind of resource was designed to model in-order units within an out-of-order core. It&rsquo;s most commonly used for modeling <strong>un-pipelined</strong> units nowadays (which, of course, is in-order). Yes, it&rsquo;s 2024 and there are still computations that are difficult to be pipelined, most notably integer &ndash; sometimes even floating point &ndash; <em>divisions</em>. It is possible to make integer divisions pipelined, but many of the times it&rsquo;s not worth the chip area.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-sched-model-latency-device.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-sched-model-latency-device.light.svg">
+  </picture>
+</div>
+<p>Some examples: Samsung Exynos M5&rsquo;s serialized (i.e. un-pipelined) integer division unit, represented by <code>M5UnitD</code> from <a href="https://github.com/llvm/llvm-project/blob/5262865aac683b72f3e66de7a122e0c455ab6b9b/llvm/lib/Target/AArch64/AArch64SchedExynosM5.td#L41">here</a>, has a buffer size of 1:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>let Super <span style="color:#89dceb;font-weight:bold">=</span>  M5UnitC, BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">1</span> in
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">M5UnitD</span>  : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// Integer division (inside C0, serialized)
+</span></span></span></code></pre></div>
+<p>RISC-V&rsquo;s Rocket chip <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedRocket.td#L41">marks</a> their integer and floating point division units, <code>RocketUnitIDiv</code> and <code>RocketUnitFPDivSqrt</code>, as latency devices too:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>let BufferSize <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">1</span> in {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">RocketUnitIDiv</span>       : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// Int Division
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">RocketUnitFPDivSqrt</span>  : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>; <span style="color:#6c7086;font-style:italic">// FP Divide/Sqrt
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span><span style="color:#6c7086;font-style:italic"></span>}</span></span></code></pre></div>
+<h3 id="epilogue">Epilogue</h3>
+<p>In this post, I went through the basics of LLVM&rsquo;s scheduling model and show how to specify the scheduling information for individual instructions. On top of that, I explained different kinds of processor resource buffers and their use cases.</p>
+<p>In the next post, I will talk about <em>how</em> exactly these resource buffer kinds and latency are used in LLVM&rsquo;s instruction scheduler and LLVM MCA, as well as their performance impact on the generated code. Which helps us to make a better decision on designing new scheduling models.</p>
+<div class="footnotes" role="doc-endnotes">
+<hr>
+<ol>
+<li id="fn:1">
+<p>It should have been used in more places like instruction selection and cost models in the middle end, but that&rsquo;s a story for another day.&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:2">
+<p>Interestingly, RISC-V has one of the biggest sets of opcodes. A large portion of them are pseudo instructions for RVV.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:3">
+<p>Using <code>WriteRes</code> is not the only way to connect <code>SchedWrite</code> with processor resources. I might talk about an alternative that involves <code>InstRW</code> and <code>SchedWriteRes</code> in future posts.&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:4">
+<p>Superscalar and out-of-order-ness are two independent concepts. Superscalar is about increasing the &ldquo;width&rdquo; of your execution units; out-of-order is about the order of executions. You can have in-order superscalar processors, which are pretty common, as well as out-of-order non-superscalar processors, which barely exist but no one can stop you from making it.&#160;<a href="#fnref:4" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+</ol>
+</div>
+]]></content:encoded></item><item><title>Legalizations in LLVM Backend</title><link>https://myhsu.xyz/llvm-codegen-legalization/</link><pubDate>Wed, 15 May 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-codegen-legalization/</guid><description>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code. While there are exceptions and corner cases, this holds in the majority of cases. Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively emulate those features.
+This might sound a little distant to our typical software development experiences, but I&amp;rsquo;m not even talking about a problem that only happens on some exotic proprietary ML accelerator whatnots.</description><content:encoded><![CDATA[<p>Ideally, compilers can build a program for a wide variety of hardware without the need to change a single line of its source code.
+While there are exceptions and corner cases, this holds in the majority of cases.
+Which means that if the input code uses something that is not directly available on the hardware, the compiler has to figure out a way to effectively <em>emulate</em> those
+features.</p>
+<p>This might sound a little distant to our typical software development experiences, but I&rsquo;m not even talking about a problem that only happens on some exotic proprietary ML accelerator whatnots. There is a good
+example of this regarding something you use almost everyday: <strong>boolean variables</strong>.
+I&rsquo;m pretty sure none of the modern processors provides 1-bit registers<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup> (or addressable memory space), yet we still use boolean variables extensively.
+Other common examples include the lack of double-precision floating point operations, or even lacks floating point unit altogether in some embedded devices.</p>
+<p>The process that &ldquo;reshapes&rdquo; input programs into using what&rsquo;s available on the target hardware is called <strong>legalization</strong> in LLVM<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup>, and it&rsquo;s done in LLVM&rsquo;s code generation (codegen)
+pipeline a.k.a the <strong>backend</strong>.
+In this post, I&rsquo;m going to give an overview on how it works.</p>
+<h3 id="a-sneak-peek-into-selectiondag-isel">A sneak peek into SelectionDAG ISel</h3>
+<p>LLVM&rsquo;s codegen pipeline in the backend is consisted of LLVM Passes, same as the middle-end<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup>. This long long pipeline is usually partitioned by important events like register allocation and instruction scheduling, and the
+legalization happens around one of the earlier events, the instruction selection (ISel).</p>
+<p>Several different ISel stratgies co-existing in LLVM at this moment. Here, we&rsquo;re focusing on <strong>SelectionDAG ISel</strong> first, which is the primary one implemented by every targets.
+This ISel turns instrutions in each basic block into a DAG, different from the &ldquo;linear&rdquo; representation of instructions as we seen in LLVM IR.</p>
+<p>We can roughly divide SelectionDAG ISel further into 4 steps, they are:</p>
+<ol>
+<li>Building SelectionDAG</li>
+<li>Type legalization</li>
+<li>Legalizing operations</li>
+<li>Instruction selection</li>
+</ol>
+<p>There are actually lots of going on in between the steps, like optimizing the DAG (by DAGCombiner) and LegalizeVectorOps in the presence of vectors (which should really be called &ldquo;scalarize vector ops&rdquo;). But in any case, legalization is primarily consist of two separate steps, type legalization and legalizing the operations (i.e. instructions). Let&rsquo;s cover these two in order.</p>
+<h3 id="type-legalization">Type legalization</h3>
+<p>Type legalization tries to turn unsupported types into the ones supported by the target architecture. To give you a better idea on how this works in action, let&rsquo;s send the following
+LLVM IR snippet into SelectionDAG ISel and see how it got legalized.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">define</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">@foo</span>(<span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span>) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#f5e0dc">%lo</span> = <span style="color:#cba6f7">trunc</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span> <span style="color:#cba6f7">to</span> <span style="color:#cba6f7">i16</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  <span style="color:#f5e0dc">%p</span> = <span style="color:#cba6f7">add</span> <span style="color:#cba6f7">i16</span> <span style="color:#f5e0dc">%lo</span>, <span style="color:#fab387">5</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>  <span style="color:#f5e0dc">%c</span> = <span style="color:#cba6f7">icmp</span> <span style="color:#cba6f7">ugt</span> <span style="color:#cba6f7">i16</span> <span style="color:#f5e0dc">%p</span>, <span style="color:#fab387">6</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>  <span style="color:#f5e0dc">%r</span> = <span style="color:#cba6f7">select</span> <span style="color:#cba6f7">i1</span> <span style="color:#f5e0dc">%c</span>, <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span>, <span style="color:#cba6f7">i32</span> <span style="color:#fab387">9</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>  <span style="color:#cba6f7">ret</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%r</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span>}</span></span></code></pre></div>
+<p>In order to print the trace of SelectionDAG ISel, please follow the instructions here to make sure the tool we&rsquo;re about to use, <code>llc</code>, has the right capability.</p>
+<details >
+  <summary>Notes on llc</summary>
+<p>Printing the trace of SelectionDAG ISel requires either a debug build of LLVM or an LLVM with assertions enabled. Unfortunately, prebuilt LLVM provided by major Linux / BSD / MacOSX
+distributions meet none of the requirements. So you might have to build LLVM from source.</p>
+<ol>
+<li>Please checkout the build instructions <a href="https://llvm.org/docs/CMake.html#quick-start">here</a></li>
+<li>During cmake configuration phase, either you set it to debug build by passing <code>-DCMAKE_BUILD_TYPE=Debug</code>, or passes <code>-DLLVM_ENABLE_ASSERTIONS=ON</code> to enable assertions on a release build</li>
+<li>We&rsquo;re about to use RISC-V as the target throughput the examples in this post, please make sure it&rsquo;s built, which is the default.</li>
+<li>Run <code>cmake --build . --target llc</code> to build only the <code>llc</code>.</li>
+</ol>
+</details>
+Then, please run the following command with `input.ll` being the snippet we saw previously.
+<details >
+  <summary>llc command</summary>
+<p><code>llc -mtriple riscv32 -debug-only=isel-dump input.ll -o /dev/null</code></p>
+</details>
+<p>You&rsquo;ll see an output partitioned into several sections, starting with sentences like <em>&ldquo;Initial selection DAG: &hellip;&rdquo;</em> or <em>&ldquo;Optimized lowered selection DAG: &hellip;&rdquo;</em></p>
+
+
+
+
+
+
+<pre tabindex="0"><code>Initial selection DAG: %bb.0 &#39;foo:&#39;
+...
+Optimized lowered selection DAG: %bb.0 &#39;foo:&#39;
+...
+Type-legalized selection DAG: %bb.0 &#39;foo:&#39;
+...
+Optimized type-legalized selection DAG: %bb.0 &#39;foo:&#39;
+...
+Legalized selection DAG: %bb.0 &#39;foo:&#39;
+...
+Optimized legalized selection DAG: %bb.0 &#39;foo:&#39;
+...
+Selected selection DAG: %bb.0 &#39;foo:&#39;
+...</code></pre>
+<p>These sections correspond to the 4 steps we&rsquo;ve discussed previously. Each of these section shows the SelectionDAG after the step, like this:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 1</span><span><span style="color:#f38ba8">Initial</span> <span style="color:#f38ba8">selection</span> <span style="color:#89dceb">DAG:</span> <span style="color:#f5e0dc">%bb.0</span> <span style="color:#f38ba8">&#39;</span><span style="color:#89dceb">foo:</span><span style="color:#f38ba8">&#39;</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 2</span><span><span style="color:#f38ba8">SelectionDAG</span> <span style="color:#f38ba8">has</span> <span style="color:#fab387">14</span> <span style="color:#89dceb">nodes:</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 3</span><span>  <span style="color:#89dceb">t0:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">EntryToken</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 4</span><span>  <span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 5</span><span>          <span style="color:#89dceb">t3:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#f38ba8">truncate</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 6</span><span>        <span style="color:#89dceb">t5:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#cba6f7">add</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">3</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">5</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 7</span><span>      <span style="color:#89dceb">t8:</span> <span style="color:#cba6f7">i1</span> = <span style="color:#f38ba8">set</span><span style="color:#cba6f7">cc</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">5</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">6</span>&gt;, <span style="color:#89dceb">setugt:</span><span style="color:#f38ba8">ch</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 8</span><span>    <span style="color:#89dceb">t10:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">select</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">8</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">9</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 9</span><span>  <span style="color:#89dceb">t12:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">CopyToReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">10</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">10</span><span>  <span style="color:#89dceb">t13:</span> <span style="color:#f38ba8">ch</span> = <span style="color:#89dceb">RISCVISD:</span><span style="color:#f38ba8">:RET_GLUE</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">12</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#89dceb">t12:</span><span style="color:#fab387">1</span></span></span></code></pre></div>
+<p>Again, we&rsquo;re not going into details of the DAG. But here are some quick primers on reading this DAG:</p>
+<details >
+  <summary>How to read SelectionDAG in 30 seconds or less</summary>
+<ul>
+<li>SelectionDAG stills keeps the SSA form, so an operation like <code>t3: i16 = truncate t2</code> defines value <code>t3</code>, which is used by <code>t5: i16 = add t3, Constant:i16&lt;5&gt;</code> as its first operand</li>
+<li><code>t3: i16</code> means that value <code>t3</code> has a 16-bit integer type
+<ul>
+<li>Don&rsquo;t worry about types like <code>ch</code> (chain) and <code>glue</code>. They&rsquo;re used to express dependencies stem from control flow or side effects.</li>
+</ul>
+</li>
+<li>Most of the operations here, like <code>truncate</code>, <code>add</code>, and <code>select</code> are pretty easy to understand. <code>setcc</code> is basically a comparison operation, which compares its first and second operand (in this case <code>t5</code> and constant 6) according to the conditional code in the third operand(in this case <code>setugt</code> &ndash; unsigned greater than). <code>CopyFromReg</code>, as its name suggested, copies values from a certain physical register to a value like <code>t2</code>.
+<ul>
+<li>Don&rsquo;t worry about the rest of the operations like <code>RISCVISD::RET_GLUE</code>. We&rsquo;re not going to need them here</li>
+</ul>
+</li>
+</ul>
+</details>
+<p>What we&rsquo;re really interested in here is the differences before and after the type legalization step.
+Here is the DAG before:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 1</span><span><span style="color:#f38ba8">Optimized</span> <span style="color:#f38ba8">lowered</span> <span style="color:#f38ba8">selection</span> <span style="color:#89dceb">DAG:</span> <span style="color:#f5e0dc">%bb.0</span> <span style="color:#f38ba8">&#39;</span><span style="color:#89dceb">foo:</span><span style="color:#f38ba8">&#39;</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 2</span><span><span style="color:#f38ba8">SelectionDAG</span> <span style="color:#f38ba8">has</span> <span style="color:#fab387">14</span> <span style="color:#89dceb">nodes:</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 3</span><span>  <span style="color:#89dceb">t0:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">EntryToken</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 4</span><span>  <span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 5</span><span>          <span style="color:#89dceb">t3:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#f38ba8">truncate</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 6</span><span>        <span style="color:#89dceb">t5:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#cba6f7">add</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">3</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">5</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 7</span><span>      <span style="color:#89dceb">t8:</span> <span style="color:#cba6f7">i1</span> = <span style="color:#f38ba8">set</span><span style="color:#cba6f7">cc</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">5</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">6</span>&gt;, <span style="color:#89dceb">setugt:</span><span style="color:#f38ba8">ch</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 8</span><span>    <span style="color:#89dceb">t10:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">select</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">8</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">9</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 9</span><span>  <span style="color:#89dceb">t12:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">CopyToReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">10</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">10</span><span>  <span style="color:#89dceb">t13:</span> <span style="color:#f38ba8">ch</span> = <span style="color:#89dceb">RISCVISD:</span><span style="color:#f38ba8">:RET_GLUE</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">12</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#89dceb">t12:</span><span style="color:#fab387">1</span></span></span></code></pre></div>
+<p>And this is the type-legalized DAG:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 1</span><span><span style="color:#f38ba8">Type-legalized</span> <span style="color:#f38ba8">selection</span> <span style="color:#89dceb">DAG:</span> <span style="color:#f5e0dc">%bb.0</span> <span style="color:#f38ba8">&#39;</span><span style="color:#89dceb">foo:</span><span style="color:#f38ba8">&#39;</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 2</span><span><span style="color:#f38ba8">SelectionDAG</span> <span style="color:#f38ba8">has</span> <span style="color:#fab387">17</span> <span style="color:#89dceb">nodes:</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 3</span><span>  <span style="color:#89dceb">t0:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">EntryToken</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 4</span><span>  <span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 5</span><span>            <span style="color:#89dceb">t16:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">add</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">5</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 6</span><span>          <span style="color:#89dceb">t22:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">and</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">16</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">65535</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 7</span><span>        <span style="color:#89dceb">t17:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#f38ba8">set</span><span style="color:#cba6f7">cc</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">22</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">6</span>&gt;, <span style="color:#89dceb">setugt:</span><span style="color:#f38ba8">ch</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 8</span><span>      <span style="color:#89dceb">t20:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">and</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">17</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">1</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 9</span><span>    <span style="color:#89dceb">t10:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">select</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">20</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">9</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">10</span><span>  <span style="color:#89dceb">t12:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">CopyToReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">10</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">11</span><span>  <span style="color:#89dceb">t13:</span> <span style="color:#f38ba8">ch</span> = <span style="color:#89dceb">RISCVISD:</span><span style="color:#f38ba8">:RET_GLUE</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">12</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#89dceb">t12:</span><span style="color:#fab387">1</span></span></span></code></pre></div>
+<p>First, let&rsquo;s look at line 4 ~ 6 in the <strong>pre</strong>-type-legalized DAG:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    <span style="color:#89dceb">t3:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#f38ba8">truncate</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  <span style="color:#89dceb">t5:</span> <span style="color:#cba6f7">i16</span> = <span style="color:#cba6f7">add</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">3</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">5</span>&gt;</span></span></code></pre></div>
+<p>The <code>t5: i16 = add t3, Constant:i16&lt;5&gt;</code> obviously corresponds to the <code>%p = add i16 %lo, 5</code> instruction in our original LLVM IR, in which both of them are <em>16-bit</em> arithmetic summation. However, a physical register in 32-bit RISC-V (RV32) is always 32 bits, therefore after copying values from physical register <code>%0</code> via <code>CopyFromReg</code>, we have to truncate its value to 16 bits before feeding into the <code>add</code>, hence <code>t3: i16 = truncate t2</code>.</p>
+<p>But wait a second, RV32 doesn&rsquo;t have any 16-bit arithmetic add instruction either! Actually, at this moment, none of the RISC-V instructions is capable of processing 16-bit data natively. That means we can never lower <code>t5: i16 = add t3, Constant:i16&lt;5&gt;</code> to a single RISC-V instruction. What we can do is <em>synthesizing</em> it with 32-bit arithmetic instructions, therefore we get this in the <strong>post</strong>-type-legalized DAG:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    <span style="color:#89dceb">t16:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">add</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">5</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  <span style="color:#89dceb">t22:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">and</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">16</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">65535</span>&gt;</span></span></code></pre></div>
+<p><code>t22: i32 = and t16, Constant:i32&lt;65535&gt;</code> effectively zeros out the higher 16 bits in the result produced by the now-32-bit arithmetic add instruction, <code>t16: i32 = add t2, Constant:i32&lt;5&gt;</code>, which makes sure the result has the same precision as before. With this transformation, we not only ensure that all operations are only using types supported by RV32, the calculation result is also correct. In other words, we turn operations that use 16-bit integers &ndash; an <em>illegal type</em> in RISC-V &ndash; into legal ones, hence the name of type legalization.</p>
+<p>Let&rsquo;s look at another similar example: line 7 and 8 in the pre-type-legalized DAG.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>  <span style="color:#89dceb">t8:</span> <span style="color:#cba6f7">i1</span> = <span style="color:#f38ba8">set</span><span style="color:#cba6f7">cc</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">5</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i16</span>&lt;<span style="color:#fab387">6</span>&gt;, <span style="color:#89dceb">setugt:</span><span style="color:#f38ba8">ch</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#89dceb">t10:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">select</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">8</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">9</span>&gt;</span></span></code></pre></div>
+<p>As we mentioned at the beginning of this post, none of the modern processors really supports 1-bit type natively, and RISC-V is not an exception, which means 1-bit integer/boolean is considered an illegal type. Here, the type legalization did a similar thing we&rsquo;ve seen previously: turning boolean into 32-bit integers and apply a proper mask:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>    <span style="color:#89dceb">t17:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#f38ba8">set</span><span style="color:#cba6f7">cc</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">22</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">6</span>&gt;, <span style="color:#89dceb">setugt:</span><span style="color:#f38ba8">ch</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#89dceb">t20:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">and</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">17</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">1</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span><span style="color:#89dceb">t10:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">select</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">20</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">9</span>&gt;</span></span></code></pre></div>
+<p>The result of <code>setcc</code> is changed from <code>i1</code> to <code>i32</code>, whose higher 31 bits are cleared by the mask before feeding into the <code>select</code> operation.</p>
+<h4 id="determining-legal-types-and-actions-on-illegal-types">Determining legal types and actions on illegal types</h4>
+<p>So how is a type to be considered legal or illegal in a target? In LLVM, the criteria is pretty straightforward: types that can natively fit into physical register are considered legal and deemed illegal otherwise. This information is setup by a target in its TargetLowering, which is usually put in <code>XXXXISelLowering.cpp</code> where &ldquo;XXXX&rdquo; is the target name. For instance, in RISC-V, it looks like:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#6c7086;font-style:italic">// Set up the register classes.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89b4fa">addRegisterClass</span>(XLenVT, <span style="color:#89dceb;font-weight:bold">&amp;</span>RISCV<span style="color:#89dceb;font-weight:bold">::</span>GPRRegClass);</span></span></code></pre></div>
+<p>In which <code>XLenVT</code> represents 32-bit integer in RV32 and 64-bit integer in RV64 (64-bit RISC-V). Take RV32 as an example, this line basically says that <code>GPRRegClass</code> &ndash; a group of general-purpose registers &ndash; can carry 32-bit integers. Since <code>GPRRegClass</code> is the only integer reigster class in RISC-V, 32-bit integer is the only legal integer type in RV32<sup id="fnref:4"><a href="#fn:4" class="footnote-ref" role="doc-noteref">4</a></sup>.</p>
+<p>What&rsquo;s a little more complicate is how we deal with illegal types. The type legalizer will determine the best action to turn them into legal types. What we&rsquo;ve seen earlier, turning 16-bit or 1-bit integers into 32-bit integers, is <em>promotion</em> (turning smaller types to larger ones). Other actions include expanding integer / floating point (split larger types into two smaller ones), soften floating point (turn into integer of equivalent size), split vector (cut vectors into shorter length) and widen vector (increase the vector length) etc.</p>
+<p>The type legalizer has a pre-defined sequence to perform for each of these legalization actions, so a target doesn&rsquo;t really have to specify how to actually do the legalization in this part.</p>
+<p>An important takeaway from type legalization is that it looks at every single value appears in the program, checks its type and tries legalizing it if needed. It doesn&rsquo;t care what <strong>operation</strong> the value came from. In other words, the concept of legal type in this phase is <em>global</em> and indepdent from individual operations. This is different from what we&rsquo;re going to see in legalizing operation in the next section, where individual operation has different interpretations of its own legality.</p>
+<h3 id="legalizing-operations">Legalizing operations</h3>
+<p>A SelectionDAG is generated from a single basic block of the source LLVM IR. Each instruction in the basic block is basically translated into a single SelectionDAG node<sup id="fnref:5"><a href="#fn:5" class="footnote-ref" role="doc-noteref">5</a></sup> called <code>SDNode</code>, representing an operation like <code>t16: i32 = add t2, Constant:i32&lt;5&gt;</code> we&rsquo;ve seen previously. Initially, each SDNode has a <strong>generic</strong>, target-independent opcode. In a (heavily) hand-waving analogy, a SDNode in this stage is basically an one-to-one translation from its LLVM instruction which is equally target-independent.
+Nearly all of the SDNodes we&rsquo;ve seen so far in the examples, like <code>t20: i32 = and t17, Constant:i32&lt;1&gt;</code> and <code>t16: i32 = add t2, Constant:i32&lt;5&gt;</code> are SDNodes with generic opcodes<sup id="fnref:6"><a href="#fn:6" class="footnote-ref" role="doc-noteref">6</a></sup>.</p>
+<p>Not every of these SDNodes have its corresponding native instructions in the target hardware, though. For instance, some less-powerful processors do not natively support rotate  / funnel shifts. Meaning, in those cases we have to turn an operation rotating left by 3 bits (e.g. <code>t4: i32 = rotl t2, Constant:i32&lt;3&gt;</code>) into something else, for instance . For these targets, a <code>rotl</code> operation is considered <em>illegal</em> and we&rsquo;re <strong>legalizing</strong> such operations into supported, legal operations in the phase follows type-legalization.</p>
+<details >
+  <summary>What are funnel / rotate shifts</summary>
+<p>Funnel shift is a special variant of bit shifting that fills in the spaces left by bits shifted away with bits from another value. It&rsquo;s a function that takes two bit sequences (e.g. integers) and a constant value specifying the number of bits to shift.
+For example, given two 5-bit integers A and B:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>MSB                    LSB
+| A4 | A3 | A2 | A1 | A0 |
+--------------------------
+| B4 | B3 | B2 | B1 | B0 |</code></pre>
+<p>Funnel left shift A and B by 2 bits, <code>funnel_left(A, B, 2)</code>, yields the following result:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>| A2 | A1 | A0 | B4 | B3 |</code></pre>
+<p>You can imagine it being A shifts left by 2 bits while the empty space in the lower bits are filled in by the higher two bits of B.</p>
+<p>If A and B are identical, for instance <code>funnel_left(A, A, 2)</code>, then it becomes a <strong>rotate left</strong> operation, as it yields the following result that looks like the higher bits in A that got shifted out are &ldquo;wrapping around&rdquo; to the lower bits:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>| A2 | A1 | A0 | A4 | A3 |</code></pre>
+</details>
+<p>In fact, since RISC-V&rsquo;s rotate instructions are optional (they are defined in Zbb and Zbkb extensions), let&rsquo;s see how RISC-V handles rotate <em>in absence of</em> native rotate instructions. Here is the input LLVM IR:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">define</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">@foo</span>(<span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span>) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#f5e0dc">%r</span> = <span style="color:#cba6f7">call</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">@llvm.fshl.i32</span>(<span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span>, <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%v</span>, <span style="color:#cba6f7">i32</span> <span style="color:#fab387">3</span>)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  <span style="color:#cba6f7">ret</span> <span style="color:#cba6f7">i32</span> <span style="color:#f5e0dc">%r</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>}</span></span></code></pre></div>
+<p><code>llvm.fshl.*</code> is the <a href="https://llvm.org/docs/LangRef.html#llvm-fshl-intrinsic">intrinsic</a> for funnel left shifts.
+If we use the exactly same <code>llc</code> command as earlier to compile this snippet and dump the DAGs, this is the (optimized) DAG right after type-legalization:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>  <span style="color:#89dceb">t0:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">EntryToken</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>      <span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>    <span style="color:#89dceb">t4:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#f38ba8">rotl</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">3</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>  <span style="color:#89dceb">t6:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">CopyToReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">4</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>  <span style="color:#89dceb">t7:</span> <span style="color:#f38ba8">ch</span> = <span style="color:#89dceb">RISCVISD:</span><span style="color:#f38ba8">:RET_GLUE</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">6</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#89dceb">t6:</span><span style="color:#fab387">1</span></span></span></code></pre></div>
+<p><code>rotl</code> on line 3 is the rotate left operation. It rotates its first operand (<code>t2</code>) by the number of bits specified in the second operand (i.e. 3).</p>
+<p>After legalizing operations, we have the following DAG:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>  <span style="color:#89dceb">t0:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">EntryToken</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#89dceb">t2:</span> <span style="color:#cba6f7">i32</span>,<span style="color:#f38ba8">ch</span> = <span style="color:#f38ba8">CopyFromReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> %0
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>      <span style="color:#89dceb">t11:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">shl</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">3</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>      <span style="color:#89dceb">t13:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#f38ba8">srl</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">2</span>, <span style="color:#89dceb">Constant:</span><span style="color:#cba6f7">i32</span>&lt;<span style="color:#fab387">29</span>&gt;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>    <span style="color:#89dceb">t14:</span> <span style="color:#cba6f7">i32</span> = <span style="color:#cba6f7">or</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">11</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">13</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>  <span style="color:#89dceb">t6:</span> <span style="color:#f38ba8">ch</span>,<span style="color:#f38ba8">glue</span> = <span style="color:#f38ba8">CopyToReg</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">0</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#f38ba8">t</span><span style="color:#fab387">14</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span>  <span style="color:#89dceb">t7:</span> <span style="color:#f38ba8">ch</span> = <span style="color:#89dceb">RISCVISD:</span><span style="color:#f38ba8">:RET_GLUE</span> <span style="color:#f38ba8">t</span><span style="color:#fab387">6</span>, <span style="color:#89dceb">Register:</span><span style="color:#cba6f7">i32</span> <span style="color:#f38ba8">$x</span><span style="color:#fab387">10</span>, <span style="color:#89dceb">t6:</span><span style="color:#fab387">1</span></span></span></code></pre></div>
+<p>Line 3 to 5 in the post-legalized DAG show that we legalize <code>rotl</code> by <em>synthesizing</em> it with bitwise OR on the extractions of higher-bit part (i.e. <code>t11: i32 = shl t2, Constant:i32&lt;3&gt;</code>) and lower-bit part (i.e. <code>t13: i32 = srl t2, Constant:i32&lt;29&gt;</code>).</p>
+<p>Of course, there are more than one way to legalize an operation. For instance, on embedded devices that don&rsquo;t have multiplication instructions, we might legalize a <code>mul</code> by simply replacing it with a call to library functions that &ldquo;emulate&rdquo; multiplications with a sequence of additions.</p>
+<p>This brings us to the next section, where we ask a similar question we had seen before: how is an operation considered legal or illegal in a specific target? How do we handle illegal operations?</p>
+<h4 id="determine-legal-operations-and-actions-on-illegal-operations">Determine legal operations and actions on illegal operations</h4>
+<p>Contrary to what we&rsquo;ve seen in type legalizer, each target has to declare its own illegal operations and specify the desired way to handle each of them. This information is also placed in each target&rsquo;s TargetLowering (put under <code>XXXXISelLowering.cpp</code>). For example, RISC-V uses the following lines from <a href="https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L353">here</a> (abridged for clarity) to declare multiplications being illegal in the absent of Zbb / Zbkb extensions, and how to handle it:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">if</span> (<span style="color:#89dceb;font-weight:bold">!</span>Subtarget.<span style="color:#89b4fa">hasStdExtZbb</span>() <span style="color:#89dceb;font-weight:bold">&amp;&amp;</span> <span style="color:#89dceb;font-weight:bold">!</span>Subtarget.<span style="color:#89b4fa">hasStdExtZbkb</span>())
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#89b4fa">setOperationAction</span>({ISD<span style="color:#89dceb;font-weight:bold">::</span>ROTL, ISD<span style="color:#89dceb;font-weight:bold">::</span>ROTR}, XLenVT, Expand);</span></span></code></pre></div>
+<p><code>setOperationAction</code> is the key here: for each opcode specified in its first argument (<code>ISD::ROTL</code> and <code>ISD::ROTR</code> in this case) that operates on value type specified by its second argument (i.e. <code>XLenVT</code>), we perform an action on the third argument (<code>Expand</code> in this case) to legalize it.</p>
+<p>Let&rsquo;s look at the third argument first, here are the possible actions we can do to legalize an operation:</p>
+<ul>
+<li>Expand</li>
+<li>LibCall</li>
+<li>Promote</li>
+<li>Custom</li>
+</ul>
+<p><strong>Expand</strong> tries to synthesize an operation with other legal operations, which we had seen how it worked on rotate left. The &ldquo;recipe&rdquo; to expand an operation is pre-defined (rather than defined by each target). If you&rsquo;re interested in learning what these recipes look like, most of them are put under <code>llvm/lib/CodeGen/SelectionDAG/TargetLowering.cpp</code> and <code>llvm/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp</code>.</p>
+<p>If the legalizer fails to expand an operation (e.g. none of the sub-operations used in synthesis are legal), it will fallback to the next action, <strong>LibCall</strong>, which replaces the operation with calls to library functions. Of course, a target can just set an operation&rsquo;s legalizer action directly to this. For instance, RISC-V <a href="https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L1409">always uses</a> lock-free atomic builtin functions when the <code>forced-atomic</code> feature is enabled.</p>
+<p><strong>Promote</strong> will promote an operation to operate on the next larger legal type. For instance, in a target where 32-bit and 64-bit integers are the legal types, <code>t3:i32 = add t2, Constant:i32&lt;5&gt;</code> will be promoted to <code>t3:i64 = add t2, Constant:i64&lt;5&gt;</code>. The recipes of how to promote individual operations are pre-defined, too. In fact, they are the same routines that are also used by the type legalizer.
+Now, since we mentioned type legalizer, you may wonder: didn&rsquo;t we finish type legalization already? Why do we need to deal with type legality again?</p>
+<p>Recall our takeaway at the end of last section: type legalization only cares about &ldquo;globally illegal&rdquo; types. That are, types which can&rsquo;t natively fit into any of the physical registers. It turns arbitrary types that can be as crazy as <code>i17</code> or <code>i87</code> into a small subset of legal types and it does this in an operation-agnostic fashion.
+But within this small subset of legal types, some operations might only capable of handling an even <em>smaller</em> number of (legal) types!</p>
+<p>An interesting example in RISC-V is the <em>Zfhmin</em> extension. Zfhmin is designed for a special scenarios where floating point values are stored in 16-bit format (i.e. F16), but majority of the arithmetics still operates on normal 32-bit floating points (i.e. F32). Therefore, in Zfhmin only data conversion / type casting operations like <code>fcvt.s.h</code> (convert from F16 to F32) support F16 while rest of the floating point operations are same as the F extension, which operate on F32. To deal with this type mixing, RISC-V backend declares F16 as legal type when Zfhmin is present, but mandates that all non-conversion F16 arithmetic instructions have to be promoted to F32 in this scenario:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">static</span> <span style="color:#cba6f7">const</span> <span style="color:#f38ba8">unsigned</span> ZfhminZfbfminPromoteOps[] <span style="color:#89dceb;font-weight:bold">=</span> {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    ISD<span style="color:#89dceb;font-weight:bold">::</span>FMINNUM,      ISD<span style="color:#89dceb;font-weight:bold">::</span>FMAXNUM,       ISD<span style="color:#89dceb;font-weight:bold">::</span>FADD,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>    ISD<span style="color:#89dceb;font-weight:bold">::</span>FSUB,         ISD<span style="color:#89dceb;font-weight:bold">::</span>FMUL,          ISD<span style="color:#89dceb;font-weight:bold">::</span>FMA,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>    ISD<span style="color:#89dceb;font-weight:bold">::</span>FDIV,         ISD<span style="color:#89dceb;font-weight:bold">::</span>FSQRT,         ISD<span style="color:#89dceb;font-weight:bold">::</span>FABS,
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>    ISD<span style="color:#89dceb;font-weight:bold">::</span>FNEG,         ...};
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>...
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span><span style="color:#cba6f7">if</span> (Subtarget.<span style="color:#89b4fa">hasStdExtZfhminOrZhinxmin</span>() <span style="color:#89dceb;font-weight:bold">&amp;&amp;</span> <span style="color:#89dceb;font-weight:bold">!</span>Subtarget.<span style="color:#89b4fa">hasStdExtZfhOrZhinx</span>())
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">8</span><span>  <span style="color:#89b4fa">setOperationAction</span>(ZfhminZfbfminPromoteOps, MVT<span style="color:#89dceb;font-weight:bold">::</span>f16, Promote);</span></span></code></pre></div>
+<p>(The above snippet is adapted from <a href="https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L457">here</a>)</p>
+<p>Now, onto the last legalization action: <strong>Custom</strong>.
+As the name suggested, this is basically a wildcard action that allows a target to do whatever it wants on a generic SDNode. For each operation assigned to this action, <code>XXXXTargetLowering::LowerOperation</code> implements the actual legalization.</p>
+<p>Take <code>ISD::FMINIMUM</code> and <code>ISD::FMAXIMUM</code> as an example, these two are floating point min/max operations conforming to IEEE-754-<strong>2019</strong> standard. The F extension in RISC-V, however, mostly<sup id="fnref:7"><a href="#fn:7" class="footnote-ref" role="doc-noteref">7</a></sup> conforms to IEEE-754-<strong>2008</strong> standard. Biggest difference between these two? Only IEEE-754-2019 propagates the NaN (Not-A-Number): If <em>either</em> A or B is a NaN, <code>fmaximum(A, B)</code> in IEEE-754-2019 returns a NaN; RISC-V&rsquo;s <code>fmaximum(A, B)</code>, on the other hand, returns NaN only if <em>both</em> A and B are NaNs.</p>
+<p>So for RISC-V, doing custom legalization on <code>ISD::FMINIMUM</code> and <code>ISD::FMAXIMUM</code> would be an easier option to overcome this semantic mismatch.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">if</span> (Subtarget.<span style="color:#89b4fa">hasStdExtFOrZfinx</span>() <span style="color:#89dceb;font-weight:bold">&amp;&amp;</span> <span style="color:#89dceb;font-weight:bold">!</span>Subtarget.<span style="color:#89b4fa">hasStdExtZfa</span>())
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#89b4fa">setOperationAction</span>({ISD<span style="color:#89dceb;font-weight:bold">::</span>FMAXIMUM, ISD<span style="color:#89dceb;font-weight:bold">::</span>FMINIMUM}, MVT<span style="color:#89dceb;font-weight:bold">::</span>f32, Custom);</span></span></code></pre></div>
+<p>Then, in <code>lowerFMAXIMUM_FMINIMUM</code>, the <a href="https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L5725">function</a> <code>RISCVTargetLowering::LowerOperation</code> calls to legalize those two operations, RISC-V adds an additional check that conditionally returns the result from its native fminimum/fmaximum instructions only when <em>neither</em> of the operands is NaN; otherwise, it returns a NaN.</p>
+<p>Another thing worth noting is that, if a custom legalize action failed (e.g. the custom handler doesn&rsquo;t recognize/support the code it&rsquo;s looking at), it falls back to <em>Expand</em>. So the complete &ldquo;chain of legalizer fallbacks&rdquo; would be: Custom -&gt; Expand -&gt; LibCall.</p>
+<h4 id="the-value-type-to-legalize">The value type to legalize</h4>
+<p>Before wrapping up this section, I would like to spend some time on the second argument of <code>setOperationAction</code>: value type of the operation it&rsquo;s trying to legalize.
+Theoritically, it represent the subset of legal types &ndash; given the fact that we have finished type legalization at this stage &ndash; that are not supported in a specific operation and demanded further legalizations.</p>
+<p>As it turns out, <em>illegal</em> types can also be used on this argument!</p>
+<p>For instance, in RV64 where 32-bit integer is considered an illegal type<sup id="fnref:8"><a href="#fn:8" class="footnote-ref" role="doc-noteref">8</a></sup>, we have the following line (abridged for clarity) for even the most basic operations like <code>ISD::ADD</code>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">if</span> (Subtarget.<span style="color:#89b4fa">is64Bit</span>())
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#89b4fa">setOperationAction</span>({ISD<span style="color:#89dceb;font-weight:bold">::</span>ADD, ISD<span style="color:#89dceb;font-weight:bold">::</span>SUB, ISD<span style="color:#89dceb;font-weight:bold">::</span>SHL, ISD<span style="color:#89dceb;font-weight:bold">::</span>SRA, ISD<span style="color:#89dceb;font-weight:bold">::</span>SRL},
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>                      MVT<span style="color:#89dceb;font-weight:bold">::</span>i32, Custom);</span></span></code></pre></div>
+<p>The truth is that, the relationship between type and operation legalizer is more&hellip;interwinded than we thought. Type legalizer mostly runs in an operation-agnostic fashion, but when it sees an illegal type, it actually asks the operation legalizer if there is a <code>Custom</code> action handler attached on this operation with the said illegal type, and tries to run that custom (operation) legalization preemptively.</p>
+<p>The idea is that we want to have a leeway to legalize an operation with its <em>original</em> value type. Because unlike LLVM IR where we have explicit <code>zext</code>, <code>sext</code>, or <code>trunc</code> instructions to specify type conversions, in SelectionDAG all these extensions / truncations might be lowered into operations like <code>and t2, &lt;bit mask&gt;</code> (for zero extension) anytime before we actually legalize the operation, which increases the difficulties to recover those information.
+Therefore, <code>Custom</code> legalizer action is allowed to handle illegal types.</p>
+<p>Back to our RV64 example, the reason it wants custom legalization on <code>i32</code> is due to RV64&rsquo;s unique <em>widening</em> instructions, like <code>ADDW</code>, which takes two 32-bit integers and sign-extends them into 64-bit integers before the actual (64-bit) arithmetic addition. By replacing the original operations with these widening instructions preemptively in the <a href="https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L11971">custom handler</a>, we could avoid extra sign-extension instructions that would have been created (by type legalizer) for each of its operands otherwise.</p>
+<p>Since we have brought up <code>ADDW</code>, an instruction with 32-bit operands and 64-bit result, another interesting question related to <code>setOperationAction</code>&rsquo;s second argument is: <em>whose</em> type does this argument refer to? result type(s)? operand types? <em>which</em> operand&rsquo;s type?</p>
+<p>For most of the instructions in majority of architectures, this is barely a question, since operands and results in simple arithmetics like ADD, SUB, and MUL usually have the same data type. But as we&rsquo;ve seen in <code>ADDW</code>&rsquo;s example, that&rsquo;s not always the case. Even worse, many operations don&rsquo;t even have a uniform data type for all their operands!</p>
+<p>Take <strong>vector reduction</strong> as an example, it is a common vector operation that aggregates vector elements by a specific action (e.g. add, mul, and). For instance, the <code>llvm.vector.reduce.add</code> <a href="https://llvm.org/docs/LangRef.html#llvm-vector-reduce-add-intrinsic">intrinsic</a> produces an integer result that is the <em>summation</em> of all its elements. Some of its variant, <code>llvm.vector.reduce.fadd</code> which performs floating point add reduction, <a href="https://llvm.org/docs/LangRef.html#llvm-vector-reduce-fadd-intrinsic">has</a> a <em>scalar</em> start value as its first operand and the vector to sum up as the second operand.</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">declare</span> <span style="color:#f38ba8">float</span> <span style="color:#f5e0dc">@llvm.vector.reduce.fadd.v4f32</span>(<span style="color:#f38ba8">float</span> <span style="color:#f5e0dc">%start_value</span>, &lt;<span style="color:#fab387">4</span> <span style="color:#cba6f7">x</span> <span style="color:#f38ba8">float</span>&gt; <span style="color:#f5e0dc">%v</span>)</span></span></code></pre></div>
+<p>In this case, which type should we specify in <code>setOperationAction</code> for <code>ISD::VECREDUCE_FADD</code> (the opcode of <code>llvm.vector.reduce.fadd</code>)?</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89b4fa">setOperationAction</span>(ISD<span style="color:#89dceb;font-weight:bold">::</span>VECREDUCE_FADD, <span style="color:#89dceb;font-weight:bold">???</span>, Custom);</span></span></code></pre></div>
+<p>The answer for this particular question is the scalar operand&rsquo;s type (i.e. <code>float</code>). But can we use the vector operand&rsquo;s type instead to determine the legality of this operation?</p>
+<p>Unfrotunately, no.</p>
+<p>The legalizer has already set the rule on which operand type or result type to use. This might not be a huge inconvenient in most cases, yet it still causes confusions and ambiguities sometimes, largely because these rules are not written in any documentations! (or any TableGen or .inc / .def files for easier lookups<sup id="fnref:9"><a href="#fn:9" class="footnote-ref" role="doc-noteref">9</a></sup>) They only appear in legalizer&rsquo;s codebase, specifically in the <code>SelectionDAGLegalize::LegalizeOp</code> function for most rules.</p>
+<p>In addition to this issue, so far we&rsquo;ve seen several shortcomings on how legalization is designed in SelectionDAG ISel. In the last section of this post, I&rsquo;m going to briefly show you how another instruction selection framework in LLVM, <strong>GlobalISel</strong>, addresses some of these problems.</p>
+<h3 id="legalization-in-globalisel-a-comparison">Legalization in GlobalISel: a comparison</h3>
+<p>GlobalISel is a relatively new instruction selection framework designed to improve compilation time while producing code with a decent quality. It deserves its own blog posts (or even series!) so we&rsquo;re not going into the details here, but covering only its legalization component.</p>
+<p>But even before switching the topic to GlobalISel, let&rsquo;s jump back to SelectionDAG ISel and take a moment to think about its overall flow:</p>
+<ol>
+<li>At the beginning, values from LLVM IR can have arbitrary types so crazy types like <code>i17</code> and <code>i87</code> might sprinkle here and there.</li>
+<li>Type legalizer goes all the way to turn <em>every</em> of these illegal types into a small set of legal types.</li>
+<li>But then, you found out: &ldquo;Oops, each operation might have their own preference on the types it supports&rdquo;. Namely, these types are what an operation <em>actually</em> wants.</li>
+<li>We legalizes individal operations to iron out those unsupported legal types as well as unsupported operations.</li>
+<li>But if our focus has always been the types supported by individual operations&hellip;</li>
+</ol>
+<p><em>Then why can&rsquo;t we just jump from Step (1) to Step (4)?</em></p>
+<p>Why can&rsquo;t we <strong>consolidate</strong> type and operation legalization into a single stage?</p>
+<p>And that is basically what GlobalISel does: for each operation, we specify its legal types and the &ldquo;recipes&rdquo; for legalizing it <em>at the same place</em>.
+The interface to describe these information has a similar look to the <code>setOperationAction</code> function we&rsquo;ve seen previously in SelectionDAG ISel. Let&rsquo;s see an example from RISC-V&rsquo;s GlobalISel legalizer:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89b4fa">getActionDefinitionsBuilder</span>({G_ADD, G_SUB, G_AND, G_OR, G_XOR})
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    .<span style="color:#89b4fa">legalFor</span>({s32, sXLen})
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>    .<span style="color:#89b4fa">legalIf</span>(<span style="color:#89b4fa">typeIsLegalIntOrFPVec</span>(<span style="color:#fab387">0</span>, IntOrFPVecTys, ST))
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>    .<span style="color:#89b4fa">widenScalarToNextPow2</span>(<span style="color:#fab387">0</span>)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>    .<span style="color:#89b4fa">clampScalar</span>(<span style="color:#fab387">0</span>, s32, sXLen);</span></span></code></pre></div>
+<p><code>getActionDefinitionsBuilder</code> here specifies the legality of operations listed in its first argument: <code>G_ADD</code>, <code>G_SUB</code>, <code>G_AND</code> etc. They are opcodes for (generic) operations in GlobalISel, similar to <code>ISD::ADD</code>, <code>ISD::SUB</code>, and <code>ISD::AND</code> in SelectionDAG ISel.</p>
+<p>The next line describes the legal types of its operands. More specifically, <code>legalFor({s32, sXLen})</code> says that operand 0 is considered legal if it&rsquo;s a 32-bit scalar or a <code>XLen</code> type. Note that the first operand of an operation in GlobalISel, called a <a href="https://llvm.org/docs/GlobalISel/GMIR.html">generic Machine IR (gMIR)</a> instruction, actually represents the instruction&rsquo;s <strong>result</strong>. So we&rsquo;re specifying the legal result type here; the line after is doing a similar thing, but calling out to another predicate function <code>typeIsLegalIntOrFPVec</code> to determine the legality.</p>
+<p>After declaring the legal types, it&rsquo;s time to describe how to deal with the <em>illegal</em> ones (e.g. crazy types like <code>i17</code> and <code>i87</code>). If we look at the lines follows, <code>widenScalarToNextPow2(0)</code> will make illegal types at operand 0 widen to the next type with power-of-two size, before the resulting types being clamped by <code>clampScalar</code> into a type range bounded by 32-bit scalar and <code>XLen</code>.</p>
+<p>The aforementioned function calls compose a chain of legalization steps consisting of <em>checks</em> (e.g. <code>legalFor</code>) and <em>actions</em> (e.g. <code>clampScalar</code>) that are executed in sequence. There are also some familiar actions that we&rsquo;ve seen earlier, for example:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89b4fa">getActionDefinitionsBuilder</span>(G_SEXT_INREG)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    .<span style="color:#89b4fa">customFor</span>({sXLen})
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>    .<span style="color:#89b4fa">maxScalar</span>(<span style="color:#fab387">0</span>, sXLen)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>    .<span style="color:#89b4fa">lower</span>();</span></span></code></pre></div>
+<p><code>customFor</code> has the same effect as the <code>Custom</code> action we&rsquo;ve seen in <code>setOperationAction</code>: delegating the legalization to custom handlers reside in each target&rsquo;s <code>LegalizerInfo::legalizeCustom</code>. If this step fails, it falls to the next action, <code>maxScalar</code>, which sets an upper bound on the type size and goes to the final action, <code>lower</code>, which is basically the <code>Expand</code> action in SelectionDAG&rsquo;s legalizer.</p>
+<p>In the previous section, we mentioned that SelectionDAG legalizer uses one of the operand types to check against the second argument of <code>setOperationAction</code> for determining the operation&rsquo;s legality. As of which operand types to pick, it&rsquo;s predefined and sometimes causing some confusions and ambiguities.</p>
+<p>GlobalISel&rsquo;s legalizer, on the other hand, has more flexibility on which operand you want to legalize. We&rsquo;ve already got a hint from our previous examples, where we can designate a specific operand index subject to the legalizer action. So for instructions without a uniform operand types, like interger-to-pointer, it becomes easy to specify the action for its integer operand only:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#89b4fa">getActionDefinitionsBuilder</span>(G_INTTOPTR)
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    .<span style="color:#89b4fa">legalFor</span>({{p0, sXLen}})
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>    .<span style="color:#89b4fa">clampScalar</span>(<span style="color:#fab387">1</span>, sXLen, sXLen);</span></span></code></pre></div>
+<p>To summarize, GlobalISel&rsquo;s legalizer expresses legalities &ndash; especially type legalities &ndash; in a more <em>explicit</em> way. Consolidating all legalizations into one phase also helps people to understand them better.</p>
+<h3 id="epilogue">Epilogue</h3>
+<p>Without a doubt, we need to create more learning resources for LLVM backend development. This post is my humble effort to shed some lights on a really important backend subsystem, which we&rsquo;re not even able to get to instruction selection without it. I hope you learn how SelectionDAG ISel&rsquo;s type and operation legalizer interacts with each other and how to specify the action to legalize illegal types or operations. I also hope you enjoy the last section on a more modern legalizer design.</p>
+<p>Thanks for reading!</p>
+<div class="footnotes" role="doc-endnotes">
+<hr>
+<ol>
+<li id="fn:1">
+<p>Status registers like EFLAGS in X86 might qualify (I mean its individual status bits), but it&rsquo;s still far away from being generally usable.&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:2">
+<p>Though frontends like Clang do generate target-specific LLVM IR, a lot of those target-specific bits are in regard to ABI conformance rather than legalizations.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:3">
+<p>At the time of writing, the codegen pipeline hasn&rsquo;t migrated to using the <em>new</em> PassManager yet, while the middle-end had wrapped up the migration years ago.&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:4">
+<p>Floating point is optional in RISC-V, and we&rsquo;re not covering it here either.&#160;<a href="#fnref:4" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:5">
+<p>Well, not always a single SDNode, since the SelectionDAG builder actually delegates lots of DAG building logics to each target and each target can definitely generate more than one SDNode from a LLVM instruction. The most notable example is function calls: each target implements <code>TargetLowering::LowerCall</code> to lower a <code>llvm::CallInst</code> to its native function call constructions consisting of one or more SDNodes.&#160;<a href="#fnref:5" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:6">
+<p>The full list of opcodes can be found under <a href="https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/CodeGen/ISDOpcodes.h">llvm/include/llvm/CodeGen/ISDOpcodes.h</a>.&#160;<a href="#fnref:6" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:7">
+<p>Except the fact that RISC-V&rsquo;s F extension does make -0.0 smaller than +0.0, which is a IEEE-754-2019 feature.&#160;<a href="#fnref:7" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:8">
+<p>Unless you flip an experimental flag <code>-riscv-experimental-rv64-legal-i32</code> to say otherwise.&#160;<a href="#fnref:8" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:9">
+<p>One exception might be VP (Vector Predicated) intrinsics, whose operand for legalization can be found in <code>llvm/include/llvm/IR/VPIntrinsics.def</code>.&#160;<a href="#fnref:9" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+</ol>
+</div>
+]]></content:encoded></item></channel></rss>
