@@ -28,8 +28,8 @@ legalization happens around one of the earlier events, the instruction selection
 
 [^3]: At the time of writing, the codegen pipeline hasn't migrated to using the _new_ PassManager yet, while the middle-end had wrapped up the migration years ago.
 
-Several different ISel stratgies co-existing in LLVM at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemented by every targets.
-This ISel turns instrutions in each basic block into a DAG, different from the "linear" representation of instructions as we seen in LLVM IR.
+Several different ISel strategies co-existing in LLVM at this moment. Here, we're focusing on **SelectionDAG ISel** first, which is the primary one implemented by every targets.
+This ISel turns instructions in each basic block into a DAG, different from the "linear" representation of instructions as we seen in LLVM IR.
 
 We can roughly divide SelectionDAG ISel further into 4 steps, they are:
   1. Building SelectionDAG
@@ -177,7 +177,7 @@ What's a little more complicate is how we deal with illegal types. The type lega
 The type legalizer has a pre-defined sequence to perform for each of these legalization actions, so a target doesn't really have to specify how to actually do the legalization in this part.
 
 
-An important takeaway from type legalization is that it looks at every single value appears in the program, checks its type and tries legalizing it if needed. It doesn't care what **operation** the value came from. In other words, the concept of legal type in this phase is _global_ and indepdent from individual operations. This is different from what we're going to see in legalizing operation in the next section, where individual operation has different interpretations of its own legality.
+An important takeaway from type legalization is that it looks at every single value appears in the program, checks its type and tries legalizing it if needed. It doesn't care what **operation** the value came from. In other words, the concept of legal type in this phase is _global_ and independent from individual operations. This is different from what we're going to see in legalizing operation in the next section, where individual operation has different interpretations of its own legality.
 
 ### Legalizing operations
 A SelectionDAG is generated from a single basic block of the source LLVM IR. Each instruction in the basic block is basically translated into a single SelectionDAG node[^5] called `SDNode`, representing an operation like `t16: i32 = add t2, Constant:i32<5>` we've seen previously. Initially, each SDNode has a **generic**, target-independent opcode. In a (heavily) hand-waving analogy, a SDNode in this stage is basically an one-to-one translation from its LLVM instruction which is equally target-independent.
@@ -246,7 +246,7 @@ Of course, there are more than one way to legalize an operation. For instance, o
 This brings us to the next section, where we ask a similar question we had seen before: how is an operation considered legal or illegal in a specific target? How do we handle illegal operations?
 
 #### Determine legal operations and actions on illegal operations
-Contrary to what we've seen in type legalizer, each target has to declare its own illegal operations and specify the desired way to handle each of them. This information is also placed in each target's TargetLowering (put under `XXXXISelLowering.cpp`). For example, RISC-V uses the following lines from [here](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L353) (abridged for clarity) to declare multiplications being illegal in the absent of Zbb / Zbkb extensions, and how to handle it:
+Contrary to what we've seen in type legalizer, each target has to declare its own illegal operations and specify the desired way to handle each of them. This information is also placed in each target's TargetLowering (put under `XXXXISelLowering.cpp`). For example, RISC-V uses the following lines from [here](https://github.com/llvm/llvm-project/blob/b7ed097f29d712b1cc839e15ab68d2c8a2ce07cc/llvm/lib/Target/RISCV/RISCVISelLowering.cpp#L353) (abridged for clarity) to declare rotations being illegal in the absent of Zbb / Zbkb extensions, and how to handle it:
 ```c
 if (!Subtarget.hasStdExtZbb() && !Subtarget.hasStdExtZbkb())
   setOperationAction({ISD::ROTL, ISD::ROTR}, XLenVT, Expand);
@@ -300,7 +300,7 @@ Another thing worth noting is that, if a custom legalize action failed (e.g. the
 
 #### The value type to legalize
 Before wrapping up this section, I would like to spend some time on the second argument of `setOperationAction`: value type of the operation it's trying to legalize.
-Theoritically, it represent the subset of legal types -- given the fact that we have finished type legalization at this stage -- that are not supported in a specific operation and demanded further legalizations.
+Theoretically, it represent the subset of legal types -- given the fact that we have finished type legalization at this stage -- that are not supported in a specific operation and demanded further legalizations.
 
 As it turns out, _illegal_ types can also be used on this argument!
 
@@ -333,7 +333,7 @@ setOperationAction(ISD::VECREDUCE_FADD, ???, Custom);
 ```
 The answer for this particular question is the scalar operand's type (i.e. `float`). But can we use the vector operand's type instead to determine the legality of this operation? 
 
-Unfrotunately, no.
+Unfortunately, no.
 
 The legalizer has already set the rule on which operand type or result type to use. This might not be a huge inconvenient in most cases, yet it still causes confusions and ambiguities sometimes, largely because these rules are not written in any documentations! (or any TableGen or .inc / .def files for easier lookups[^9]) They only appear in legalizer's codebase, specifically in the `SelectionDAGLegalize::LegalizeOp` function for most rules.
 
@@ -349,7 +349,7 @@ But even before switching the topic to GlobalISel, let's jump back to SelectionD
   1. At the beginning, values from LLVM IR can have arbitrary types so crazy types like `i17` and `i87` might sprinkle here and there.
   2. Type legalizer goes all the way to turn _every_ of these illegal types into a small set of legal types.
   3. But then, you found out: "Oops, each operation might have their own preference on the types it supports". Namely, these types are what an operation _actually_ wants.
-  4. We legalizes individal operations to iron out those unsupported legal types as well as unsupported operations.
+  4. We legalizes individual operations to iron out those unsupported **legal** types as well as unsupported operations.
   5. But if our focus has always been the types supported by individual operations...
 
 _Then why can't we just jump from Step (1) to Step (4)?_
