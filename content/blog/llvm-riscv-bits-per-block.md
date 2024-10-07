@@ -102,7 +102,7 @@ vadd.vv v0, v0, v8
 ret
 ```
 
-The bottome line is that in most cases, LMUL is considered to be "semi-dynamic" -- it might change during runtime, but in a more _deterministic_ way.
+The bottom line is that in most cases, LMUL is considered to be "semi-dynamic" -- it might change during runtime, but in a more _deterministic_ way.
 
 And that is one of the reasons why RISC-V backend assigns each LMUL (and SEW) a unique scalable vector type -- because it is possible to determine it during compile time. In comparison, ARM SVE folds all the dynamic bits into a single parameter, vscale.
 
@@ -135,8 +135,8 @@ To have a vscale value that doesn't depend on `SEW`, there is a simple trick: cr
 
 The figure above used a fake base vector of 64 bits, which contains 2 elements in it when SEW=32. Combining with LMUL=4, we get eight 32-bit elements in a single dotted box. Again, vscale value is equal to the number of dotted boxes, but this time, we can easily evaluate it with `VLEN / 64` -- vscale no longer depends on `SEW`.
 
-The size of the fake base vector, 64 bits in this example, is `RISCV::RISCVBitsPerBlock`.
+The size of the fake base vector, 64 bits in this example, is `RISCV::RISCVBitsPerBlock`. To put it differently, in RISC-V backend, the vscale value is always equal to `VLEN / RISCV::RISCVBitsPerBlock`.
 
-It sound a little bit like magic where the `SEW` factor just suddenly disappears from the equation. But what it really does was simply using the _least common multiple (LCM)_ of all the supported SEW (8, 16, 32, and 64 bits) to "tile" `VLEN`.
+It sound a little bit like magic where the `SEW` factor just suddenly disappears from the equation. But what it really does was simply using the _least common multiple (LCM)_ of all the supported SEW (8, 16, 32, and 64 bits) to "tile" `VLEN`. The downside of this design is that we can't support 32-bit `VLEN` out of the box, which is a known limitation in RISC-V LLVM backend. It sounds a little unusal to have such a small vector size of 32 bits, but apparently `Zve32*` extensions were created to put vectors into embedded devices, in which case a smaller vector sizes makes more sense.
 
 Granted, it's not really common to use `RISCV::RISCVBitsPerBlock` directly, but I thought it's fun to know where it came from and why it's created in the first place. And that's all for this short post! Hope you enjoy.
