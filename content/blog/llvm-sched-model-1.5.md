@@ -8,7 +8,7 @@ In the [previous post](/llvm-sched-model-1), we covered the basics of scheduling
 
 While I _was_ planning to write how scheduling models are used in this post -- namely, covering things like instruction scheduler and MCA -- the draft was overwhelmed by the sheer amount of content needed to cover just the substrate. In addition, I found that I missed some more advanced yet commonly used constructions in the previous post. So if you'll excuse me, I'd like to procrastinate writing about MachineScheduler and MCA, leaving it for future Min to worry, and dive into three important scheduling model constructions in this post: number of `ProcResource` units, `ProcResGroup`, and super resource.
 
-These three horsemen together enable scheduling models to express **hierarchy** structure -- a concept that we have only scratched the surface previously. Modern microarchitectures often employ complicated processor resource distribution and grouping, like having multiple execution pipes with asymmetric capabilities. It is of paramount importance to express those structures with the things we're about to cover.
+These three horsemen together enable scheduling models to express **hierarchy** structure -- a concept that we have only scratched the surface previously. Modern microarchitectures often employ complicated processor resource distributions and groupings, like having multiple execution pipes with asymmetric capabilities. It is of paramount importance to express those structures with the things we're about to cover.
 Without further ado, let's start with the number of `ProcResource` units!
 
 ### Number of units in a ProcResource
@@ -211,10 +211,6 @@ def Zn3Store : ProcResource<2> {
 
 By designating `Zn3LSU` as their super resource, both `Zn3Load` and `Zn3Store` are essentially representing a subset of all three pipes from `Zn3LSU` -- 2 pipes for `Zn3Store` and 3 for `Zn3Load`, coinciding with what we saw from Zen3's microarchitecture diagram earlier.
 Put it differently, a unit from `Zn3LSU` can either be _allocated_ as a load or a store pipe, while no more than two store pipes are allowed to exist at any given time.
-
-In conclusion, super resource is useful when you want to represent a subet of units from an existing `ProcResource` and you care _nothing_ but the quantity of sub-units.
-
--------
 
 LLVM implements super resource in a really similar way to how it implements `ProcResGroup` -- by _expanding_ `ProcResource` that has super resources. Let me explain this using the snippet below which shows some `Zn3Load` and `Zn3Store` usages.
 ```cpp
