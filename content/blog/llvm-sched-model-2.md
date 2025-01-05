@@ -1,5 +1,5 @@
 +++
-title = "Scheduling Model in LLVM - Part II"
+title = "(Archive) Scheduling Model in LLVM - Part II"
 date = "2024-08-17"
 draft = true
 tags = ['llvm', 'compiler-instruction-scheduling']
