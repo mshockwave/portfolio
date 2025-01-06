@@ -212,3 +212,8 @@ Similar to indexed load, `vluxseg` accesses memory in arbitrary order while `vlo
 ----
 
 And that's pretty much it! Once we categorized in this way it's actually not so hard to understand. Segmented access might look daunting at first glance, but once you're familiar with segments, rest of the concepts can just be carried over from their strided access counterparts.
+
+### Comments
+Feel free to leave comments at https://github.com/mshockwave/portfolio/discussions/8
+
+Any feedback is much appreciated!
