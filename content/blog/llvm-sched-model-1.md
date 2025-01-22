@@ -5,7 +5,7 @@ tags = ['llvm', 'compiler-instruction-scheduling']
 +++
 
 Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions.
-In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction's latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)[^4]. Which makes it an important factor in performance tuning for low-level code.
+In order to do that, compilers have to know a whole bunch of information, ranging from individual instruction's latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)[^4]. Which makes it an important factor in performance tuning for low-level code.
 
 This series is about LLVM's scheduling model, how it interacts / affects other parts of LLVM and how can we fine tune this model for better performance. I'll cover how scheduling models are used in other part of LLVM in later posts, but in this one, I'm focusing on the scheduling model itself first, and talk about how to specify scheduling information for individual instructions. Let's start with a really basic example.
 
@@ -49,7 +49,7 @@ The `WriteRes` TableGen class[^3] takes a `SchedWrite` -- in this case `WriteIDI
 
 What about `ReadIDIV`, the `SchedRead` instances we saw earlier? By default, LLVM's scheduling model assumes that operand reads finish instantly, so a `SchedRead` cannot be assigned a latency property nor consuming any cycle the same way as a `SchedWrite`.
 
-Which means that effectively, write operands dictate the instruction's scheduling properties and it's expected to repersent majority of the changes an instruction makes to the processor states. So, it's safe to say that in this case, an `DIV` instruction has a latency of 66 cycles.
+Which means that effectively, write operands dictate the instruction's scheduling properties and it's expected to represent majority of the changes an instruction makes to the processor states. So, it's safe to say that in this case, an `DIV` instruction has a latency of 66 cycles.
 
 Alright, so far we have covered the most basic part of a scheduling model, specifically on how to specify the scheduling information for an instruction. We can summarize it into three quick steps:
   1. Assigning `SchedRead` and `SchedWrite` to your instruction
@@ -177,7 +177,7 @@ This `MicroOpBufferSize` attribute is primarily used to throttle the number of u
 So far we have been discussing out-of-order cores, which is one of the primary reasons why we need buffers in the first place. But in-order cores are still a thing, because it dramatically simplifies the chip design and reduces the area, which are top on the list for products like embedded devices. It's also getting more popular in cases where you want save areas for specialized units like BIG vector units or even matrix multiplication units. SiFive's X280, which we've seen its scheduling model previously, and X390 are good examples, where they save area by adopting in-order design and enjoying a whopping 512- and 1024-bit vector, respectively.
 
 For in-order cores, you simply set `BufferSize` and `MicroOpBufferSize` mentioned earlier to **zero**.
-When an uop is handed to an in-order unit in LLVM's scheduling model, _dispatch_ and _issue_ are conisdered happening at the same time.
+When an uop is handed to an in-order unit in LLVM's scheduling model, _dispatch_ and _issue_ are considered happening at the same time.
 
 <div style="text-align: center;">
   <picture>
