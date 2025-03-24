@@ -269,3 +269,6 @@ In that thread, [@jvillette38](https://github.com/jvillette38) also proposed usi
 We've shown the answer of the first question to be "No". Though as it turns out, inverse throughput is still dominated by the longest segment. I think this can partially be explained by  `D`'s formula, which suggests that the longest hardware resource segment in the second instruction is always the first to touch its counterpart in the first instruction during left shifting, with **no gap** in between. Implying that the total length (i.e total cycles) is equal or larger than the longest segment length times `N`. And in the case where resource with the longest segment is not where right-most cycle happens, the "delta" between the release cycle of _last_ longest segment and the actual right-most cycle will just be a constant which we can happily ignore when `N` is sufficiently large.
 
 Anyway, I hope I'm not overthinking this whole time 😛 and I hope this post provides a stronger argument on using largest segment length as inverse throughput. 
+
+### Comments
+Feel free to leave comments at https://github.com/mshockwave/portfolio/discussions/12
