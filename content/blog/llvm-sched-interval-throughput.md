@@ -249,14 +249,23 @@ Which makes the right-most cycle (of all `N` instructions) we've been looking fo
 ```
 (ReleaseAtCycle_i - AcquireAtCycle_i) x N, i = P2
 ```
-As it turns out, the inverse throughput of `N` instructions with resource segments -- right-most cycle divided by `N` -- simply equals to the **longest** segment length among all hardware resources!
+As it turns out, the inverse throughput of `N` instructions with resource segments -- right-most cycle divided by `N` -- simply equals[^3] to the **longest** segment length among all hardware resources!
+
+```
+Inverse throughput =
+  max(ReleaseAtCycle_i - AcquireAtCycle_i), ∀ i = hardware resources
+```
+
+This formula also covers both the basic cases from section 2 and cases with resource segments.
+
+[^3]: Again, assuming number of units in each resource is equal to 1. If it's greater than 1, then the inverse throughput should be further divided by the number of units.
 
 #### Discussions
 
 Here is a little background of why I wrote this post: at the time of writing, `MCSchedModel::getReciprocalThroughput` doesn't handle `AcquireAtCycle` at all, this [comment](https://github.com/llvm/llvm-project/pull/130574#discussion_r2005110229) from a code review raised a question on how to calculate it, which nerd-sniped me and as a consequence, this post.
 
-In that thread, [@jvillette38](https://github.com/jvillette38) did propose using longest resource segment as inverse throughput. What's missing from the picture to me is that inverse throughput should be calculated from the right-most cycle of all `N` instructions -- but is the resource with the longest segment _always_ be the one where right-most cycle happens? Or just in general, what's the connection between the longest segment length and the right-most cycle?
+In that thread, [@jvillette38](https://github.com/jvillette38) also proposed using longest resource segment as inverse throughput. However, it was slightly counter-intuitive to me at that time as inverse throughput should be calculated from the right-most cycle of all `N` instructions, yet is the resource with the longest segment _always_ be the one where right-most cycle happens? And in general, what's the connection between the longest segment length and the right-most cycle?
 
-We've shown that the answer to the first question is "No". Though as it turns out, inverse throughput is still dominated by the longest segment. I think this can partially be explained by  `D`'s formula, which suggests that the longest hardware resource segment in the second instruction is always the first to touch its counterpart in the first instruction during left shifting, with **no gap** in between. Implying that the total length (i.e total cycles) is equal or larger than the longest segment length times `N`. And in the case where resource with the longest segment is not where right-most cycle happens, the "delta" between the release cycle of _last_ longest segment and the actual right-most cycle will just be a constant which we can happily ignore when `N` is sufficiently large.
+We've shown the answer of the first question to be "No". Though as it turns out, inverse throughput is still dominated by the longest segment. I think this can partially be explained by  `D`'s formula, which suggests that the longest hardware resource segment in the second instruction is always the first to touch its counterpart in the first instruction during left shifting, with **no gap** in between. Implying that the total length (i.e total cycles) is equal or larger than the longest segment length times `N`. And in the case where resource with the longest segment is not where right-most cycle happens, the "delta" between the release cycle of _last_ longest segment and the actual right-most cycle will just be a constant which we can happily ignore when `N` is sufficiently large.
 
-Anyway, I hope I'm not overthinking this whole time 😛 and I hope this post provides a stronger argument on using **largest segment length** as inverse throughput.
+Anyway, I hope I'm not overthinking this whole time 😛 and I hope this post provides a stronger argument on using largest segment length as inverse throughput. 
