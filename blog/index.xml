@@ -556,7 +556,7 @@ The throughput contributed by each resource used by this instruction is calculat
 
 <pre tabindex="0"><code>mul a1, a1, a2
 mul t4, t4, t5
-mul r7, r7, r0</code></pre>
+mul t0, t0, t1</code></pre>
 <p>What we&rsquo;re interested in here, is how each of them <strong>consumes</strong> processor resources. We can visualize this process with the following resource consumption table:</p>
 <table>
 <thead>
