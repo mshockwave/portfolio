@@ -745,9 +745,9 @@ mul        a3, a3, t0</code></pre>
 <p>To give you a better idea, let&rsquo;s see a real-world example from the <strong>Load / Store Unit (LSU)</strong> in AMD Zen3.</p>
 <figure style="text-align: center;">
   <img src="/images/zen3-uarch-lsu.png">
-  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chip and Cheese</a>. Captured from the <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
+  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chips and Cheese</a>. Captured from the <a href="https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
 </figure>
-<p>The diagram above shows the LSU part of <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/">Zen3&rsquo;s microarchitecture</a>. There are three arrows between load &amp; store queues and L1 Data Cache, along with an equal number of AGUs (Address Generation Unit) positioned above the queues.</p>
+<p>The diagram above shows the LSU part of <a href="https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/">Zen3&rsquo;s microarchitecture</a>. There are three arrows between load &amp; store queues and L1 Data Cache, along with an equal number of AGUs (Address Generation Unit) positioned above the queues.</p>
 <p>You might notice that among all three arrows, which are load and store pipes, between the queues and L1 Data Cache, only two of them goes down (indicating <em>stores</em>) while there are three going up (indicating <em>loads</em>). This reveals that all three available pipes are capable of loading data, while only two of them (don&rsquo;t care which two of them though) can store data. Importantly, each pipe can either load or store data at any given time, but not both simultaneously.</p>
 <p>This structure is described by <a href="https://github.com/llvm/llvm-project/blob/c503758ab6a4eacd3ef671a4a5ccf813995d4456/llvm/lib/Target/X86/X86ScheduleZnver3.td#L368">the following code</a> in Zen3&rsquo;s scheduling model:</p>
 
