@@ -123,7 +123,7 @@ Let's look at another instruction, `BLOB`, with the following `AcquireAtCycle` a
 | P1 |        2       |        5       |
 | P2 |        1       |        3       |
 
-When `AcquireAtCycle` is greater than zero, the instruction will not seize this resource right after being issued, but until another `AcquireAtCycle` cycles later. Which means the duration `BLOB` holds on each resources -- also knownw as **resource segments** -- now looks like:
+When `AcquireAtCycle` is greater than zero, the instruction will not seize this resource right after being issued, but until another `AcquireAtCycle` cycles later. Which means the duration `BLOB` holds on each resources -- also known as **resource segments** -- now looks like:
 
 <div style="text-align: center;">
   <picture>
@@ -152,9 +152,9 @@ There are several insights we learned about calculating inverse throughput of no
 So our task can really boil down to finding the right-most cycle here.
 Looking at the last diagram, we might considering using `max(ReleaseAtCycles) x N` as the right-most cycle for instructions with resource segments here again.
 
-Because first, the resource with `max(ReleaseAtCycles)` -- `P1` in this case -- will always be the resource where righ-most cycle happens. Now the question would be the quantity of this right-most cycle: _Intuitively_, resource with `max(ReleaseAtCycles)` will always be the one that concatenates with its counterpart in the next instruction, back to back, without any "gap" in between. So the quantity of right-most cycle can be easily calculated as `max(ReleaseAtCycles) x N`.
+Because first, the resource with `max(ReleaseAtCycles)` -- `P1` in this case -- will always be the resource where right-most cycle happens. Now the question would be the quantity of this right-most cycle: _Intuitively_, resource with `max(ReleaseAtCycles)` will always be the one that concatenates with its counterpart in the next instruction, back to back, without any "gap" in between. So the quantity of right-most cycle can be easily calculated as `max(ReleaseAtCycles) x N`.
 
-As you might have noticed, having no gap is an important prerequsite here, otherwise if there is a gap, it will becomes part of the _recurring_ factor. Namely, the right-most cycle will be something like `(max(ReleaseAtCycles) + C) x N` where `C` is a constant factor of gap.
+As you might have noticed, having no gap is an important prerequisite here, otherwise if there is a gap, it will becomes part of the _recurring_ factor. Namely, the right-most cycle will be something like `(max(ReleaseAtCycles) + C) x N` where `C` is a constant factor of gap.
 
 But is it always the case for resources with `max(ReleaseAtCycles)` to have no gaps in between?
 
@@ -173,7 +173,7 @@ Sadly, here is a counter example:
   </picture>
 </div>
 
-There is still a silver lining in this though: regardless of gap, the resource with `max(ReleaseAtCycles)` is still the resource where righ-most cycle happens -- as we can observe from this counter example as well. So if we can figure out `C` -- the constant factor of gap -- then we still can calculate the inverse throughput in terms of `max(ReleaseAtCycles)`.
+There is still a silver lining in this though: regardless of gap, the resource with `max(ReleaseAtCycles)` is still the resource where right-most cycle happens -- as we can observe from this counter example as well. So if we can figure out `C` -- the constant factor of gap -- then we still can calculate the inverse throughput in terms of `max(ReleaseAtCycles)`.
 
 For that, let's play a liiiitle bit of jigsaw puzzle.
 
