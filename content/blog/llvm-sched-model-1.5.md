@@ -186,10 +186,10 @@ To give you a better idea, let's see a real-world example from the **Load / Stor
 
 <figure style="text-align: center;">
   <img src="/images/zen3-uarch-lsu.png">
-  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chip and Cheese</a>. Captured from the <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
+  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chips and Cheese</a>. Captured from the <a href="https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
 </figure>
 
-The diagram above shows the LSU part of [Zen3's microarchitecture](https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/). There are three arrows between load & store queues and L1 Data Cache, along with an equal number of AGUs (Address Generation Unit) positioned above the queues.
+The diagram above shows the LSU part of [Zen3's microarchitecture](https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/). There are three arrows between load & store queues and L1 Data Cache, along with an equal number of AGUs (Address Generation Unit) positioned above the queues.
 
 You might notice that among all three arrows, which are load and store pipes, between the queues and L1 Data Cache, only two of them goes down (indicating _stores_) while there are three going up (indicating _loads_). This reveals that all three available pipes are capable of loading data, while only two of them (don't care which two of them though) can store data. Importantly, each pipe can either load or store data at any given time, but not both simultaneously.
 

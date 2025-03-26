@@ -35,11 +35,11 @@ def Zn3Store : ProcResource<2> {
 
 At this point, you might be wondering: "why do we need another `Zn3LSU` when we've already covered the load and store parts separately through `Zn3Load` and `Zn3Store`?"
 
-To clarify this, let's first look at the actual LSU in [Zen3's microarchitecture](https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/) shown below.
+To clarify this, let's first look at the actual LSU in [Zen3's microarchitecture](https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/) shown below.
 
 <figure style="text-align: center;">
   <img src="/images/zen3-uarch-lsu.png">
-  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chip and Cheese</a>. Captured from the <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
+  <figcaption>Image source: <a href="https://chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/">Chips and Cheese</a>. Captured from the <a href="https://old.chipsandcheese.com/2022/11/05/amds-zen-4-part-1-frontend-and-execution-engine/zen3-drawio/"> original image </a>.</figcaption>
 </figure>
 
 In the figure above, there are three arrows between load & store queues and L1 Data Cache, along with an equal number of AGUs (Address Generation Unit) positioned above the queues.
