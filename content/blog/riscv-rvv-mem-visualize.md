@@ -6,7 +6,7 @@ tags = ['riscv']
 
 RISC-V Vector (RVV) extension has several kinds of load / store instructions which access memory in different ways. Just as the memory access pattern might take a little more time to fully understand, it gets even more tricky when multiplexing with RVV's own concepts like variable element size (SEW), register groups (LMUL), number of elements (VL), masks and mask / tail policies.
 
-Personally I found it easier to memorize them with visualiztion, hence this (relatively) short post!
+Personally I found it easier to memorize them with visualization, hence this (relatively) short post!
 
 The following content is going to put these instructions in two main categories by their memory access patterns: _strided_ and _segmented_ access. Each of them can be further divided into several sub categories.
 We also assume `VLEN` -- the size of a single vector register -- to be 128 bits. And since RVV store instructions work nearly the same way as loads except going to other direction from registers to memory, we're only discussing load instructions here.
@@ -52,7 +52,7 @@ To give a concrete example, considered the following snippet:
 vsetvli  zero, zero, e32, m4
 vle64.v  v4, (a0)
 ```
-EEW (e64) now differs from SEW (e32). Therefore, while it loads 64-bit elements from memory, the regieter grouping it actually uses (i.e. EMUL) is now 8, because `EMUL = (e64 / e32) * 4`.
+EEW (e64) now differs from SEW (e32). Therefore, while it loads 64-bit elements from memory, the register grouping it actually uses (i.e. EMUL) is now 8, because `EMUL = (e64 / e32) * 4`.
 
 The idea of scaling LMUL is to make sure `VLMAX` -- the maximum number of elements we can process, or the maximum `VL` value -- stays the same. 
 
@@ -98,11 +98,11 @@ Here, the register group started with `v0` contains the offset values (in bytes)
 </div>
 
 With a new vector register group as indices come into play, indexed load has a slightly different rule regarding EEW and EMUL. The element width encoded in the opcode -- 32 bits in the case of `vluxei32` -- becomes EEW for the _index_ register group, which consequently uses the scaled register grouping factor as its EMUL.
-On the other hand, the data register group now uses SEW and LMUL specificed by `vsetvli` as their element width and register grouping factor!
+On the other hand, the data register group now uses SEW and LMUL specified by `vsetvli` as their element width and register grouping factor!
 
 As shown in the diagram, these offset values from the index register group are always applied relative to the starting address -- the one pointed by `a0` -- rather than being relative to the address of the previous element.
 
-Another thing worth noting is that the instruction we used, `vluxei32.v`, accesses elements on memory in _arbitrary_ order, just like unit-stride and constan-stride loads. RVV, however, does provide another variant of indexed load, `vloxei32.v`, that accesses memory in-order.
+Another thing worth noting is that the instruction we used, `vluxei32.v`, accesses elements on memory in _arbitrary_ order, just like unit-stride and constant-stride loads. RVV, however, does provide another variant of indexed load, `vloxei32.v`, that accesses memory in-order.
 
 ### Segmented access
 
@@ -166,7 +166,7 @@ The destination register group specified in the assembly instruction, `v4` in th
 
 So if we have something like `vlseg3e32.v  v4, (a0)` with EMUL = 2, a total of three vector register groups will be touched:  `v4` ~ `v5`, `v6` ~ `v7`, and `v8` ~ `v9`.
 
-Similar to strided and indexed loads mentioned ealier, `VL` and mask are applied on each of the (destination) vector register groups, rather than applying on the memory.
+Similar to strided and indexed loads mentioned earlier, `VL` and mask are applied on each of the (destination) vector register groups, rather than applying on the memory.
 
 #### Strided segmented
 

@@ -9,12 +9,12 @@ In the [previous post](/llvm-sched-model-1), we covered the basics of scheduling
 
 In this post, I'll bring up some more advanced properties and focus on how scheduling models are actually _used_ in other parts of LLVM, specifically, **MCA (Machine Code Analyzer)** and **MachineScheduler**. It is particularly important to learn the usages of scheduling models, because LLVM actually doesn't have a formal spec for everything we have been talking so far, for example, the meaning of different buffer sizes. Those are coming from how other components _interpret_ these models[^1].
 
-[^1]: There are, of course, code comments on scheduling models and without a doubt they are good source of knowledges. But they are neither formal specs nor always being consistent across the entire codebase.
+[^1]: There are, of course, code comments on scheduling models and without a doubt they are good source of knowledge. But they are neither formal specs nor always being consistent across the entire codebase.
 
 By the end of this post, you'll get a better idea on how different scheduling model properties affect the instruction scheduling quality as well as the precision of other LLVM tools like `llvm-mca`. First, let's take a look at some more advanced properties in LLVM's scheduling model.
 
 ### Advanced scheduling model properties
-Previously, we've learned `ProcResource` and `ProcResGroup`. The former more or less represents a single execution unit in a superscalar processor, while the latter is a logical group of `ProcResource` where an instruction can be assigned to **one of those** (sub-)resources. In other words, `ProcResGroup` represents a _heirarchical_ structure.
+Previously, we've learned `ProcResource` and `ProcResGroup`. The former more or less represents a single execution unit in a superscalar processor, while the latter is a logical group of `ProcResource` where an instruction can be assigned to **one of those** (sub-)resources. In other words, `ProcResGroup` represents a _hierarchical_ structure.
 
 Here, we're going to introduce another kind of hierarchical structure: super resource.
 Let's explain it with an example from [AMD Zen3's Load / Store Unit (LSU)](https://github.com/llvm/llvm-project/blob/c503758ab6a4eacd3ef671a4a5ccf813995d4456/llvm/lib/Target/X86/X86ScheduleZnver3.td#L368):
@@ -59,17 +59,17 @@ The concept of super resource might sound really similar (and maybe confusing at
 #### Number of units in a ProcResource
 Despite seeing things like `ProcResource<1>` or `ProcResource<2>` multiple times, so far we've been really hand-waving on the actual meaning of `ProcResource`'s first template argument -- the number of units in this resource.
 
-In short, it specifies the maximum number of uops a `ProcResource` can handle in a single cycle. Namely, the maximum throughput. For instance, previously we've seen that `Zn3LSU` can handle at most three memory uops. Similarly, in [SiFiveP600 scheudling model](https://github.com/llvm/llvm-project/blob/d4c519e7b2ac21350ec08b23eda44bf4a2d3c974/llvm/lib/Target/RISCV/RISCVSchedSiFiveP600.td#L75), its LSU, `SiFiveP600LDST` can handle at most two loads or stores:
+In short, it specifies the maximum number of uops a `ProcResource` can handle in a single cycle. Namely, the maximum throughput. For instance, previously we've seen that `Zn3LSU` can handle at most three memory uops. Similarly, in [SiFiveP600 scheduling model](https://github.com/llvm/llvm-project/blob/d4c519e7b2ac21350ec08b23eda44bf4a2d3c974/llvm/lib/Target/RISCV/RISCVSchedSiFiveP600.td#L75), its LSU, `SiFiveP600LDST` can handle at most two loads or stores:
 ```c++
 // Two Load/Store ports that can issue either two loads, two stores, or one load
 // and one store (P550 has one load and one separate store pipe).
 def SiFiveP600LDST       : ProcResource<2>;
 ```
-When an uop is dispatched to a resource of this kind, it is effectively dispatched to _one_ of its units.
+When a uop is dispatched to a resource of this kind, it is effectively dispatched to _one_ of its units.
 
 Sounds familiar? That's right! in this sense, it is really similar to `ProcResGroup` we saw previously. In fact, `ProcResGroup` has an "implicit" number of units as well, and it's (unsurprisingly) equal to the number of sub-resource it contains.
 
-The line between when to use `ProcResGroup` and when to use `ProcResource<N>` is somewhat blurred and in many cases they're interchangable. For example, in the following figure we have an integer execution unit with three pipes: two of them are capable of doing multiplications, while division and cryptography are each restricted to a single pipe. All three of them, however, can do basic ALU operations. Each pipe has a buffer size of 16. In other words, this is a **decoupled reservation station** style structure we talked about in the [previous post](/llvm-sched-model-1).
+The line between when to use `ProcResGroup` and when to use `ProcResource<N>` is somewhat blurred and in many cases they're interchangeable. For example, in the following figure we have an integer execution unit with three pipes: two of them are capable of doing multiplications, while division and cryptography are each restricted to a single pipe. All three of them, however, can do basic ALU operations. Each pipe has a buffer size of 16. In other words, this is a **decoupled reservation station** style structure we talked about in the [previous post](/llvm-sched-model-1).
 <div style="text-align: center;">
   <picture>
     <source srcset="/images/llvm-sched-model-hierarchy-example.dark.svg" media="(prefers-color-scheme: dark)">
@@ -136,7 +136,7 @@ And here is its resource assignments:
 ### MachineScheduler
 
 <!--
-Highlights: how MachineScheduler abstract aways some details (as opposed to MCA's fidelity of actual microarchitectures) and focusing on the parts that actually affect instruction scheduling.
+Highlights: how MachineScheduler abstracts away some details (as opposed to MCA's fidelity of actual microarchitectures) and focusing on the parts that actually affect instruction scheduling.
 
 Also, visualizing instruction scheduling with MachineScheduler's debug output.
 -->
@@ -282,9 +282,9 @@ The thing we tried to do here is keeping serialized instructions with long laten
 
 The idea is that if we keep scheduling instructions that extend the critical path, there will always be one instruction that runs sequentially for its entire latency[^3]. This reduces the overall degree of _parallelism_. Ideally, we want to keep the critical path as short as possible while scheduling as many instructions as we can without extending it.
 
-[^3]: Ignoreing pipeline bypass / read advanced here.
+[^3]: Ignoring pipeline bypass / read advanced here.
 
-And that's why we pick `SUnit(2)` over `SUnit(5)`: from the illustration above we can learn that `SUnit(2)`'s depth is zero, since it doesn't have prdecessor (in this block). On the other hand, `SUnit(5)` has a depth equal to `SUnit(0)`'s latency.
+And that's why we pick `SUnit(2)` over `SUnit(5)`: from the illustration above we can learn that `SUnit(2)`'s depth is zero, since it doesn't have predecessor (in this block). On the other hand, `SUnit(5)` has a depth equal to `SUnit(0)`'s latency.
 
 You can also find the depth of each `SUnit` in the same trace. Just scroll up to the beginning, where the lines under the _"MI Scheduling"_ banner detail each `SUnit`:
 ```
@@ -345,13 +345,13 @@ So far, we have seen how MachineScheduler uses **latency** information from the 
 
 -------
 
-Recall that the whole idea of superscalar processor is to run instruction of different types _in parallel_, distributed among several different execution units like integer and floating point pipes we saw earlier. If an instruction stream is poorly organized such that a single type of instructions are executed consecutively in a large number, for instance 1000 integer ADDs running back-to-back, then a few execution units (processor resources) might be disproportionality overwhelmed while leaving others idle. 
+Recall that the whole idea of superscalar processor is to run instructions of different types _in parallel_, distributed among several different execution units like integer and floating point pipes we saw earlier. If an instruction stream is poorly organized such that a single type of instructions are executed consecutively in a large number, for instance 1000 integer ADDs running back-to-back, then a few execution units (processor resources) might be disproportionality overwhelmed while leaving others idle. 
 
 It is true that out-of-order processors can address this problem by looking ahead and distributing different instruction types evenly among all resources. Nevertheless, the number of instructions it can look ahead, which is usually equal to the size of the scheduler buffer, is limited -- less than 30 instructions in most cases. Therefore, MachineScheduler has to shoulder some of the works here to ensure uniform distribution of workloads among different processor resources.
 
 In the previous section, we picked the next SUnit to schedule based on their critical path, which is related to an instruction's **latency**. When scheduling for processor resource, however, all we care about is the instruction's **occupancy**. Occupancy is how long (in terms of cycles) an instruction "holds" a processor resource until the next instruction can use the same resource. Put it differently, since most processor resources / execution units are also pipelined, you can think of occupancy being the time an instruction spends on the first stage of this pipeline.
 
-Does this concept sound familiar? that's right, actually we have already seen occupancy in the previous post already! Specifically, when we're explaining in-order processor resource:
+Does this concept sound familiar? That's right, actually we have already seen occupancy in the previous post already! Specifically, when we're explaining in-order processor resource:
 
 <div style="text-align: center;">
   <picture>
@@ -421,7 +421,7 @@ But what's more interesting is this line sending an important message _after_ we
 ```
 *** Critical resource SiFiveP600VectorArith: 2c
 ```
-It says that `SiFiveP600VectorArith` becomes the **critical resource** now. In plain english, a critical resource is a processor resource that has been loaded with too many instructions.
+It says that `SiFiveP600VectorArith` becomes the **critical resource** now. In plain English, a critical resource is a processor resource that has been loaded with too many instructions.
 
 The exact definition of "too many instructions" here is that a single processor resource, like `SiFiveP600VectorArith`, has been _occupied_ for more cycles than the expected latency from instructions that have been scheduled so far[^4]. Again, for a pipelined processor resource, all it matters is how long a resource is (exclusively) blocked or held by a single instruction until it can handle the next one. That is, an instruction's **occupancy** we introduced earlier.
 

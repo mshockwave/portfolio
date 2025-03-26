@@ -14,7 +14,7 @@ Without further ado, let's start with the number of `ProcResource` units!
 ### Number of units in a ProcResource
 So far we've mentioned things like `ProcResource<1>` or `ProcResource<2>` several times without explaining the numbers in the template argument list. That specific argument stands for the **number of units** in a processor resource.
 
-This property is directly related to the _throughput_ of this resource, namely, how many uops can it process in a given time. To give you a more concrete example, let's see how LLVM's scheduling model calculates the **reciprocal throughput** -- a synonym of _inverse_ throughput -- of an instruction.
+This property is directly related to the _throughput_ of this resource, namely, how many uops it can process in a given time. To give you a more concrete example, let's see how LLVM's scheduling model calculates the **reciprocal throughput** -- a synonym of _inverse_ throughput -- of an instruction.
 
 ```cpp
 std::optional<double> Throughput;
@@ -35,7 +35,7 @@ if (Throughput)
 The code above is [excerpted](https://github.com/llvm/llvm-project/blob/c2717a89b8437d041d532c7b2c535ca4f4b35872/llvm/lib/MC/MCSchedule.cpp#L90) from `MCSchedModel::getReciprocalThroughput`: it scans through every write resources in this instruction (represented by its scheduling class, `SCDesc`) via each resource's index `ProcResourceIdx`.
 The throughput contributed by each resource used by this instruction is calculated by dividing the number of units (`NumUnits`) by `ReleaseAtCycle`, which is the number of cycles reserved on this resource. We eventually take the largest inverse throughput (i.e. smallest throughput) among all the resources as the overall throughput of this instruction.
 
-A single `ProcResource` with number of unit larger than one is equivalent to multiple _identical_ `ProcResource` instances. For example, let's say we have the following scheudling model:
+A single `ProcResource` with number of unit larger than one is equivalent to multiple _identical_ `ProcResource` instances. For example, let's say we have the following scheduling model:
 ```cpp
 def IEX : ProcResource<3>;
 
@@ -66,7 +66,7 @@ The instructions are dispatched from top to bottom. For each of the instruction,
 
 [^1]: The actual dispatching algorithm in real processors is much more complicated, but let's just assume it looks for available pipes without any specific order.
 
-Alternatiely, we can rewrite this table into a more compact format:
+Alternatively, we can rewrite this table into a more compact format:
 
 |  instruction | Consumed IEX units |
 |:----------------------:|:------------------:|
@@ -226,7 +226,7 @@ def Zn3Store : ProcResource<2>;
 defm : Zn3WriteResInt<WriteLoad,  [Zn3AGU012, Zn3Load], ...>;
 defm : Zn3WriteResInt<WriteStore, [Zn3AGU012, Zn3Store], ...>;
 ```
-In this snippet, `WriteLoad` -- the `SchedWrite` for some of the X86 load instructions -- uses `Zn3AGU012` and `Zn3Load` while `WriteStore` -- the `SchedRead` for some of the X86 store instrutions -- has a similar resource usage of `Zn3AGU012` and `Zn3Store`.
+In this snippet, `WriteLoad` -- the `SchedWrite` for some of the X86 load instructions -- uses `Zn3AGU012` and `Zn3Load` while `WriteStore` -- the `SchedRead` for some of the X86 store instructions -- has a similar resource usage of `Zn3AGU012` and `Zn3Store`.
 
 LLVM effectively expands the `Zn3Load` and `Zn3Store` usages in these two `SchedWrite` entries into:
 ```c++
@@ -251,7 +251,7 @@ They'll have the following resource consumptions upon dispatch (`Zn3AGU012` is o
 
 Whenever a store (e.g. `movq %r9, (%rbx)`) is being dispatched, it increases the counters of both `Zn3Store` and `Zn3LSU`. Similarly, a load instruction increases both `Zn3Load` and `Zn3LSU` counters.
 
-Let's use the following consecutive store instructions to show how we throttle the numebr of store pipes to 2:
+Let's use the following consecutive store instructions to show how we throttle the number of store pipes to 2:
 ```
 movq %r9,  (%rbx)   # store
 movq %rax, (%r8)    # store
@@ -266,9 +266,9 @@ This snippet produces the following resource consumption table:
 |    movq %r10, (%rcx)   |  0 / 3  | FAIL TO CONSUME |  3 / 3 |
 
 The last instruction fails to consume `Zn3Store`, because it only has a total of 2 units.
-In other words, the last instruction in this case is throttled by `Zn3Store`, despite the fact that there are enought number of LSU pipes.
+In other words, the last instruction in this case is throttled by `Zn3Store`, despite the fact that there are enough number of LSU pipes.
 
-And that, is how Zen3 uses super reousrce to set a cap on the number of store pipes in its scheduling model.
+And that, is how Zen3 uses super resource to set a cap on the number of store pipes in its scheduling model.
 
 ### ProcResGroup v.s. Super resource
 So far, we have learned how to use `ProcResGroup` and super resource. Naturally we want to ask: what are their actual differences and, more importantly, **when** should I use them?
@@ -302,7 +302,7 @@ def : WriteRes<WriteIMul,   [IntegerMul]>;
 def : WriteRes<WriteIDiv,   [IntegerDiv]>;
 ```
 
-In hindsight, this model looks correct: two out of three pipes can be allocated to MUL or ALU, while only a single pipe can be used for divisions. But things start to get off the track when we run the following RISC-V snippet throught this model. 
+In hindsight, this model looks correct: two out of three pipes can be allocated to MUL or ALU, while only a single pipe can be used for divisions. But things start to get off the track when we run the following RISC-V snippet through this model. 
 ```
 mul a1, a1, a2
 mul t4, t4, t5
@@ -329,7 +329,7 @@ With this expansion, we can pan out the (plausibly correct) resource consumption
 
 Again, each instruction gets the resources they demanded and everything looks correct -- until you realize that if both `IEX1` **and** `IEX2`, the multiplication-capable pipes, have already been consumed, how can the last instruction be dispatched to `IEX1`, the _only_ pipe that is capable of doing division?
 
-Now, you might try to fix this by assinging a different super resource to `IntegerDiv`, let's say `IntegerMul`:
+Now, you might try to fix this by assigning a different super resource to `IntegerDiv`, let's say `IntegerMul`:
 ```c++
 // ????
 let Super = IntegerMul in
@@ -404,7 +404,7 @@ The division instruction is unable to be dispatched, because it failed to consum
 
 I hope you're now convinced that `ProcResGroup` is more flexible and more generic than super resource, because it can express models with either tree or non-tree structures. This comes unsurprised as `ProcResGroup` was actually [invented](https://github.com/llvm/llvm-project/commit/4e67cba8a65bba60e60f48083269917b39b4e3de) _later_ than super resource.
 
-That said, super resource might come handy when we only care about the number of proceesor units and referencing the exact pipes is less important. For example, in an extreme situation where there are a total of _12_ execution pipes in a model, instead of spelling out all processor resources like this[^3]:
+That said, super resource might come handy when we only care about the number of processor units and referencing the exact pipes is less important. For example, in an extreme situation where there are a total of _12_ execution pipes in a model, instead of spelling out all processor resources like this[^3]:
 ```cpp
 def IEX0  : ProcResource<1>;
 def IEX1  : ProcResource<1>;
@@ -412,7 +412,7 @@ def IEX1  : ProcResource<1>;
 def IEX11 : ProcResource<1>;
 
 // I make up these groupings, the point is that it's
-// quite cumbersome to referece every IEX pipes they use.
+// quite cumbersome to reference every IEX pipe they use.
 def IntegerArith : ProcResGroup<[IEX0, IEX1, ...]>;
 def IntegerMul   : ProcResGroup<[IEX6, IEX8, ...]>;
 ```
@@ -426,7 +426,7 @@ let Super = IEX in {
 }
 ```
 
-[^3]: Even we can simplify it with `foreach` and some other TableGen magics, I'm sure it's still more verbose than using super resource.
+[^3]: Even we can simplify it with `foreach` and some other TableGen magic, I'm sure it's still more verbose than using super resource.
 
 ### Summary
-To conclude, in this post we discussed several options to express processor resources with hierarchy structures. Notably, `ProcResGroup` and super resource. The takeaway is that `ProcResGroup` is generally more flexible and versitile than the other options, but can be quite verbose in some cases, in which super resource or even jsut plain `ProcResource` with multiple units is more desirable.
+To conclude, in this post we discussed several options to express processor resources with hierarchy structures. Notably, `ProcResGroup` and super resource. The takeaway is that `ProcResGroup` is generally more flexible and versitile than the other options, but can be quite verbose in some cases, in which super resource or even just plain `ProcResource` with multiple units is more desirable.

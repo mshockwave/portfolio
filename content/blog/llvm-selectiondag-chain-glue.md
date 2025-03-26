@@ -164,5 +164,5 @@ t11: ch,glue = CopyToReg t9, Register:i64 $x11, t2, t9:1
 t14: ch,glue = RISCVISD::CALL t11, TargetGlobalAddress:i64<ptr @bar> 0 [TF=1], Register:i64 $x10, Register:i64 $x11, RegisterMask:Untyped, t11:1
 ```
 
-`CopyToReg` produces a chain and a glue result (recall that a `SDNode` can produce multiple results), and similar to how we create a chain edge, a glue edge is established by using the glue value normally as an operand, like how `t11` uses `t9:1` as its last operand. With glue edges, it's gauranteed that `t9` will always be put _right before_ `t11` and followed by `t14`.
+`CopyToReg` produces a chain and a glue result (recall that a `SDNode` can produce multiple results), and similar to how we create a chain edge, a glue edge is established by using the glue value normally as an operand, like how `t11` uses `t9:1` as its last operand. With glue edges, it's guaranteed that `t9` will always be put _right before_ `t11` and followed by `t14`.
 ### Glue node and physical register copy

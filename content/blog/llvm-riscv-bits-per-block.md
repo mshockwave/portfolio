@@ -28,9 +28,9 @@ To find the answer, we navigate to a line sitting just above the table in the sa
 > ...vscale is defined as VLEN/64 (see RISCV::RVVBitsPerBlock).
 
 It suggests that we can calculate the minimum number of scalable vector elements for a RVV type using `RISCV::RVVBitsPerBlock`, a magic constant that is [set to 64](https://github.com/llvm/llvm-project/blob/bf895c714e1f8a51c1e565a75acf60bf7197be51/llvm/include/llvm/TargetParser/RISCVTargetParser.h#L36).
-The code comment for `RISCV::RVVBitsPerBlock` doens't explain a lot, nor is clear what "block" here means.
+The code comment for `RISCV::RVVBitsPerBlock` doesn't explain a lot, nor is clear what "block" here means.
 
-In this short post, I'm going to explain how the table is created and the actual purpose of this mistery `RISCV::RVVBitsPerBlock` constant.
+In this short post, I'm going to explain how the table is created and the actual purpose of this mystery `RISCV::RVVBitsPerBlock` constant.
 
 ### ARM SVE -- the origin of scalable vector types
 I know it's weird to start a RISC-V blog post with ARM, but I think it's imperative to understand the origin of scalable vector types in LLVM first.
@@ -137,6 +137,6 @@ The figure above used a fake base vector of 64 bits, which contains 2 elements i
 
 The size of the fake base vector, 64 bits in this example, is `RISCV::RISCVBitsPerBlock`. To put it differently, in RISC-V backend, the vscale value is always equal to `VLEN / RISCV::RISCVBitsPerBlock`.
 
-It sound a little bit like magic where the `SEW` factor just suddenly disappears from the equation. But what it really does was simply using the _least common multiple (LCM)_ of all the supported SEW (8, 16, 32, and 64 bits) to "tile" `VLEN`. The downside of this design is that we can't support 32-bit `VLEN` out of the box, which is a known limitation in RISC-V LLVM backend. It sounds a little unusal to have such a small vector size of 32 bits, but apparently `Zve32*` extensions were created to put vectors into embedded devices, in which case a smaller vector sizes makes more sense.
+It sound a little bit like magic where the `SEW` factor just suddenly disappears from the equation. But what it really does was simply using the _least common multiple (LCM)_ of all the supported SEW (8, 16, 32, and 64 bits) to "tile" `VLEN`. The downside of this design is that we can't support 32-bit `VLEN` out of the box, which is a known limitation in RISC-V LLVM backend. It sounds a little unusual to have such a small vector size of 32 bits, but apparently `Zve32*` extensions were created to put vectors into embedded devices, in which case a smaller vector sizes makes more sense.
 
 Granted, it's not really common to use `RISCV::RISCVBitsPerBlock` directly, but I thought it's fun to know where it came from and why it's created in the first place. And that's all for this short post! Hope you enjoy.
