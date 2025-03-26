@@ -299,8 +299,8 @@ Looking at the last diagram, we might considering using <code>max(ReleaseAtCycle
 </ol>
 </div>
 ]]></content:encoded></item><item><title>Visualize RISC-V Vector Memory Instructions</title><link>https://myhsu.xyz/riscv-rvv-mem-visualize/</link><pubDate>Sun, 05 Jan 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/riscv-rvv-mem-visualize/</guid><description>RISC-V Vector (RVV) extension has several kinds of load / store instructions which access memory in different ways. Just as the memory access pattern might take a little more time to fully understand, it gets even more tricky when multiplexing with RVV&amp;rsquo;s own concepts like variable element size (SEW), register groups (LMUL), number of elements (VL), masks and mask / tail policies.
-Personally I found it easier to memorize them with visualiztion, hence this (relatively) short post!</description><content:encoded><![CDATA[<p>RISC-V Vector (RVV) extension has several kinds of load / store instructions which access memory in different ways. Just as the memory access pattern might take a little more time to fully understand, it gets even more tricky when multiplexing with RVV&rsquo;s own concepts like variable element size (SEW), register groups (LMUL), number of elements (VL), masks and mask / tail policies.</p>
-<p>Personally I found it easier to memorize them with visualiztion, hence this (relatively) short post!</p>
+Personally I found it easier to memorize them with visualization, hence this (relatively) short post!</description><content:encoded><![CDATA[<p>RISC-V Vector (RVV) extension has several kinds of load / store instructions which access memory in different ways. Just as the memory access pattern might take a little more time to fully understand, it gets even more tricky when multiplexing with RVV&rsquo;s own concepts like variable element size (SEW), register groups (LMUL), number of elements (VL), masks and mask / tail policies.</p>
+<p>Personally I found it easier to memorize them with visualization, hence this (relatively) short post!</p>
 <p>The following content is going to put these instructions in two main categories by their memory access patterns: <em>strided</em> and <em>segmented</em> access. Each of them can be further divided into several sub categories.
 We also assume <code>VLEN</code> &ndash; the size of a single vector register &ndash; to be 128 bits. And since RVV store instructions work nearly the same way as loads except going to other direction from registers to memory, we&rsquo;re only discussing load instructions here.</p>
 <p>Without further ado, let&rsquo;s get started!</p>
@@ -344,7 +344,7 @@ vle32.v  v4, (a0)</code></pre>
 
 <pre tabindex="0"><code>vsetvli  zero, zero, e32, m4
 vle64.v  v4, (a0)</code></pre>
-<p>EEW (e64) now differs from SEW (e32). Therefore, while it loads 64-bit elements from memory, the regieter grouping it actually uses (i.e. EMUL) is now 8, because <code>EMUL = (e64 / e32) * 4</code>.</p>
+<p>EEW (e64) now differs from SEW (e32). Therefore, while it loads 64-bit elements from memory, the register grouping it actually uses (i.e. EMUL) is now 8, because <code>EMUL = (e64 / e32) * 4</code>.</p>
 <p>The idea of scaling LMUL is to make sure <code>VLMAX</code> &ndash; the maximum number of elements we can process, or the maximum <code>VL</code> value &ndash; stays the same.</p>
 <h4 id="strided">Strided</h4>
 <p>For this, we&rsquo;re loading a stream of data in which elements are apart from each other in the memory by a certain distance or, <em>stride</em>.</p>
@@ -387,9 +387,9 @@ vluxei32.v  v4, (a0), v0</code></pre>
   </picture>
 </div>
 <p>With a new vector register group as indices come into play, indexed load has a slightly different rule regarding EEW and EMUL. The element width encoded in the opcode &ndash; 32 bits in the case of <code>vluxei32</code> &ndash; becomes EEW for the <em>index</em> register group, which consequently uses the scaled register grouping factor as its EMUL.
-On the other hand, the data register group now uses SEW and LMUL specificed by <code>vsetvli</code> as their element width and register grouping factor!</p>
+On the other hand, the data register group now uses SEW and LMUL specified by <code>vsetvli</code> as their element width and register grouping factor!</p>
 <p>As shown in the diagram, these offset values from the index register group are always applied relative to the starting address &ndash; the one pointed by <code>a0</code> &ndash; rather than being relative to the address of the previous element.</p>
-<p>Another thing worth noting is that the instruction we used, <code>vluxei32.v</code>, accesses elements on memory in <em>arbitrary</em> order, just like unit-stride and constan-stride loads. RVV, however, does provide another variant of indexed load, <code>vloxei32.v</code>, that accesses memory in-order.</p>
+<p>Another thing worth noting is that the instruction we used, <code>vluxei32.v</code>, accesses elements on memory in <em>arbitrary</em> order, just like unit-stride and constant-stride loads. RVV, however, does provide another variant of indexed load, <code>vloxei32.v</code>, that accesses memory in-order.</p>
 <h3 id="segmented-access">Segmented access</h3>
 <p>Rather than dealing with individual in-memory elements, segmented memory access pattern reads a larger chunk of memory &ndash; namely, a segment &ndash; at a time and distributes the content of a segment into <em>multiple</em> vector register groups.</p>
 <p>It is designed for scenarios where there is an array of objects on memory, for instance:</p>
@@ -454,7 +454,7 @@ vlseg2e32.v  v4, (a0)</code></pre>
 <p>The most unique aspect here is of course how it deals with individual fields in a segment: in principle, values from the same field is store in a single vector register group.</p>
 <p>The destination register group specified in the assembly instruction, <code>v4</code> in this case, tells the register group (i.e. <code>v4</code> ~ <code>v7</code>) for the first field. The next field will be stored in the <em>following</em> register group (i.e. <code>v8</code> ~ <code>v11</code>), and so on and so forth.</p>
 <p>So if we have something like <code>vlseg3e32.v  v4, (a0)</code> with EMUL = 2, a total of three vector register groups will be touched:  <code>v4</code> ~ <code>v5</code>, <code>v6</code> ~ <code>v7</code>, and <code>v8</code> ~ <code>v9</code>.</p>
-<p>Similar to strided and indexed loads mentioned ealier, <code>VL</code> and mask are applied on each of the (destination) vector register groups, rather than applying on the memory.</p>
+<p>Similar to strided and indexed loads mentioned earlier, <code>VL</code> and mask are applied on each of the (destination) vector register groups, rather than applying on the memory.</p>
 <h4 id="strided-segmented">Strided segmented</h4>
 <p>This is the segmented version of strided load we&rsquo;d seen earlier.</p>
 
@@ -505,7 +505,7 @@ While I was planning to write how scheduling models are used in this post &amp;n
 Without further ado, let&rsquo;s start with the number of <code>ProcResource</code> units!</p>
 <h3 id="number-of-units-in-a-procresource">Number of units in a ProcResource</h3>
 <p>So far we&rsquo;ve mentioned things like <code>ProcResource&lt;1&gt;</code> or <code>ProcResource&lt;2&gt;</code> several times without explaining the numbers in the template argument list. That specific argument stands for the <strong>number of units</strong> in a processor resource.</p>
-<p>This property is directly related to the <em>throughput</em> of this resource, namely, how many uops can it process in a given time. To give you a more concrete example, let&rsquo;s see how LLVM&rsquo;s scheduling model calculates the <strong>reciprocal throughput</strong> &ndash; a synonym of <em>inverse</em> throughput &ndash; of an instruction.</p>
+<p>This property is directly related to the <em>throughput</em> of this resource, namely, how many uops it can process in a given time. To give you a more concrete example, let&rsquo;s see how LLVM&rsquo;s scheduling model calculates the <strong>reciprocal throughput</strong> &ndash; a synonym of <em>inverse</em> throughput &ndash; of an instruction.</p>
 
 
 
@@ -527,7 +527,7 @@ Without further ado, let&rsquo;s start with the number of <code>ProcResource</co
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">13</span><span>  <span style="color:#cba6f7">return</span> <span style="color:#fab387">1.0</span> <span style="color:#89dceb;font-weight:bold">/</span> <span style="color:#89dceb;font-weight:bold">*</span>Throughput;</span></span></code></pre></div>
 <p>The code above is <a href="https://github.com/llvm/llvm-project/blob/c2717a89b8437d041d532c7b2c535ca4f4b35872/llvm/lib/MC/MCSchedule.cpp#L90">excerpted</a> from <code>MCSchedModel::getReciprocalThroughput</code>: it scans through every write resources in this instruction (represented by its scheduling class, <code>SCDesc</code>) via each resource&rsquo;s index <code>ProcResourceIdx</code>.
 The throughput contributed by each resource used by this instruction is calculated by dividing the number of units (<code>NumUnits</code>) by <code>ReleaseAtCycle</code>, which is the number of cycles reserved on this resource. We eventually take the largest inverse throughput (i.e. smallest throughput) among all the resources as the overall throughput of this instruction.</p>
-<p>A single <code>ProcResource</code> with number of unit larger than one is equivalent to multiple <em>identical</em> <code>ProcResource</code> instances. For example, let&rsquo;s say we have the following scheudling model:</p>
+<p>A single <code>ProcResource</code> with number of unit larger than one is equivalent to multiple <em>identical</em> <code>ProcResource</code> instances. For example, let&rsquo;s say we have the following scheduling model:</p>
 
 
 
@@ -589,7 +589,7 @@ mul r7, r7, r0</code></pre>
 </tbody>
 </table>
 <p>The instructions are dispatched from top to bottom. For each of the instruction, we randomly<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup> look for an empty pipe to dispatch it into.</p>
-<p>Alternatiely, we can rewrite this table into a more compact format:</p>
+<p>Alternatively, we can rewrite this table into a more compact format:</p>
 <table>
 <thead>
 <tr>
@@ -788,7 +788,7 @@ Put it differently, a unit from <code>Zn3LSU</code> can either be <em>allocated<
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c"> 9</span><span><span style="color:#6c7086;font-style:italic">// Loads, stores, and moves, not folded with other operations.
 </span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">10</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">defm</span> : Zn3WriteResInt<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteLoad,  [Zn3AGU012, Zn3Load], ...<span style="color:#89dceb;font-weight:bold">&gt;</span>;
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">11</span><span><span style="color:#89dceb">defm</span> : Zn3WriteResInt<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteStore, [Zn3AGU012, Zn3Store], ...<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
-<p>In this snippet, <code>WriteLoad</code> &ndash; the <code>SchedWrite</code> for some of the X86 load instructions &ndash; uses <code>Zn3AGU012</code> and <code>Zn3Load</code> while <code>WriteStore</code> &ndash; the <code>SchedRead</code> for some of the X86 store instrutions &ndash; has a similar resource usage of <code>Zn3AGU012</code> and <code>Zn3Store</code>.</p>
+<p>In this snippet, <code>WriteLoad</code> &ndash; the <code>SchedWrite</code> for some of the X86 load instructions &ndash; uses <code>Zn3AGU012</code> and <code>Zn3Load</code> while <code>WriteStore</code> &ndash; the <code>SchedRead</code> for some of the X86 store instructions &ndash; has a similar resource usage of <code>Zn3AGU012</code> and <code>Zn3Store</code>.</p>
 <p>LLVM effectively expands the <code>Zn3Load</code> and <code>Zn3Store</code> usages in these two <code>SchedWrite</code> entries into:</p>
 
 
@@ -841,7 +841,7 @@ movq %r10,   (%rcx)   # store</code></pre>
 </tbody>
 </table>
 <p>Whenever a store (e.g. <code>movq %r9, (%rbx)</code>) is being dispatched, it increases the counters of both <code>Zn3Store</code> and <code>Zn3LSU</code>. Similarly, a load instruction increases both <code>Zn3Load</code> and <code>Zn3LSU</code> counters.</p>
-<p>Let&rsquo;s use the following consecutive store instructions to show how we throttle the numebr of store pipes to 2:</p>
+<p>Let&rsquo;s use the following consecutive store instructions to show how we throttle the number of store pipes to 2:</p>
 
 
 
@@ -883,8 +883,8 @@ movq %r10, (%rcx)   # store</code></pre>
 </tbody>
 </table>
 <p>The last instruction fails to consume <code>Zn3Store</code>, because it only has a total of 2 units.
-In other words, the last instruction in this case is throttled by <code>Zn3Store</code>, despite the fact that there are enought number of LSU pipes.</p>
-<p>And that, is how Zen3 uses super reousrce to set a cap on the number of store pipes in its scheduling model.</p>
+In other words, the last instruction in this case is throttled by <code>Zn3Store</code>, despite the fact that there are enough number of LSU pipes.</p>
+<p>And that, is how Zen3 uses super resource to set a cap on the number of store pipes in its scheduling model.</p>
 <h3 id="procresgroup-vs-super-resource">ProcResGroup v.s. Super resource</h3>
 <p>So far, we have learned how to use <code>ProcResGroup</code> and super resource. Naturally we want to ask: what are their actual differences and, more importantly, <strong>when</strong> should I use them?</p>
 <p>Conceptually, both super resource and <code>ProcResGroup</code> provide a way to reference a subset of a larger collection of hardware units. Super resource creates a &ldquo;slice&rdquo; of an existing <code>ProcResource</code>; <code>ProcResGroup</code> approaches this from an opposite direction: it combines multiple smaller <code>ProcResource</code> into a larger set, so that we can either reference to the larger set or the original individual resource.</p>
@@ -917,7 +917,7 @@ In other words, the last instruction in this case is throttled by <code>Zn3Store
 </span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">13</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIMul,   [IntegerMul]<span style="color:#89dceb;font-weight:bold">&gt;</span>;
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">14</span><span><span style="color:#6c7086;font-style:italic">// Division
 </span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">15</span><span><span style="color:#6c7086;font-style:italic"></span><span style="color:#89dceb">def</span> : WriteRes<span style="color:#89dceb;font-weight:bold">&lt;</span>WriteIDiv,   [IntegerDiv]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
-<p>In hindsight, this model looks correct: two out of three pipes can be allocated to MUL or ALU, while only a single pipe can be used for divisions. But things start to get off the track when we run the following RISC-V snippet throught this model.</p>
+<p>In hindsight, this model looks correct: two out of three pipes can be allocated to MUL or ALU, while only a single pipe can be used for divisions. But things start to get off the track when we run the following RISC-V snippet through this model.</p>
 
 
 
@@ -977,7 +977,7 @@ div s0, s0, t0</code></pre>
 </tbody>
 </table>
 <p>Again, each instruction gets the resources they demanded and everything looks correct &ndash; until you realize that if both <code>IEX1</code> <strong>and</strong> <code>IEX2</code>, the multiplication-capable pipes, have already been consumed, how can the last instruction be dispatched to <code>IEX1</code>, the <em>only</em> pipe that is capable of doing division?</p>
-<p>Now, you might try to fix this by assinging a different super resource to <code>IntegerDiv</code>, let&rsquo;s say <code>IntegerMul</code>:</p>
+<p>Now, you might try to fix this by assigning a different super resource to <code>IntegerDiv</code>, let&rsquo;s say <code>IntegerMul</code>:</p>
 
 
 
@@ -1082,7 +1082,7 @@ div s0, s0, t0</code></pre>
 </table>
 <p>The division instruction is unable to be dispatched, because it failed to consume the <code>IntegerMul</code> resource &ndash; and this behavior is something we expect.</p>
 <p>I hope you&rsquo;re now convinced that <code>ProcResGroup</code> is more flexible and more generic than super resource, because it can express models with either tree or non-tree structures. This comes unsurprised as <code>ProcResGroup</code> was actually <a href="https://github.com/llvm/llvm-project/commit/4e67cba8a65bba60e60f48083269917b39b4e3de">invented</a> <em>later</em> than super resource.</p>
-<p>That said, super resource might come handy when we only care about the number of proceesor units and referencing the exact pipes is less important. For example, in an extreme situation where there are a total of <em>12</em> execution pipes in a model, instead of spelling out all processor resources like this<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup>:</p>
+<p>That said, super resource might come handy when we only care about the number of processor units and referencing the exact pipes is less important. For example, in an extreme situation where there are a total of <em>12</em> execution pipes in a model, instead of spelling out all processor resources like this<sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup>:</p>
 
 
 
@@ -1095,7 +1095,7 @@ div s0, s0, t0</code></pre>
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>def <span style="color:#89dceb">IEX11</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span><span style="color:#6c7086;font-style:italic">// I make up these groupings, the point is that it&#39;s
-</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span><span style="color:#6c7086;font-style:italic">// quite cumbersome to referece every IEX pipes they use.
+</span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span><span style="color:#6c7086;font-style:italic">// quite cumbersome to reference every IEX pipe they use.
 </span></span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">8</span><span><span style="color:#6c7086;font-style:italic"></span>def <span style="color:#89dceb">IntegerArith</span> : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[IEX0, IEX1, ...]<span style="color:#89dceb;font-weight:bold">&gt;</span>;
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">9</span><span>def <span style="color:#89dceb">IntegerMul</span>   : ProcResGroup<span style="color:#89dceb;font-weight:bold">&lt;</span>[IEX6, IEX8, ...]<span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
 <p>It&rsquo;s certainly easier and more concise to write:</p>
@@ -1112,7 +1112,7 @@ div s0, s0, t0</code></pre>
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>  def <span style="color:#89dceb">IntegerMul</span>   : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">6</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
 </span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>}</span></span></code></pre></div>
 <h3 id="summary">Summary</h3>
-<p>To conclude, in this post we discussed several options to express processor resources with hierarchy structures. Notably, <code>ProcResGroup</code> and super resource. The takeaway is that <code>ProcResGroup</code> is generally more flexible and versitile than the other options, but can be quite verbose in some cases, in which super resource or even jsut plain <code>ProcResource</code> with multiple units is more desirable.</p>
+<p>To conclude, in this post we discussed several options to express processor resources with hierarchy structures. Notably, <code>ProcResGroup</code> and super resource. The takeaway is that <code>ProcResGroup</code> is generally more flexible and versitile than the other options, but can be quite verbose in some cases, in which super resource or even just plain <code>ProcResource</code> with multiple units is more desirable.</p>
 <div class="footnotes" role="doc-endnotes">
 <hr>
 <ol>
@@ -1123,7 +1123,7 @@ div s0, s0, t0</code></pre>
 <p>Again, using a processor with issue width of 6&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
 </li>
 <li id="fn:3">
-<p>Even we can simplify it with <code>foreach</code> and some other TableGen magics, I&rsquo;m sure it&rsquo;s still more verbose than using super resource.&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+<p>Even we can simplify it with <code>foreach</code> and some other TableGen magic, I&rsquo;m sure it&rsquo;s still more verbose than using super resource.&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
 </li>
 </ol>
 </div>
@@ -1143,8 +1143,8 @@ It shows the LLVM IR types we use to represent RVV&amp;rsquo;s dynamically sized
 <p>&hellip;vscale is defined as VLEN/64 (see RISCV::RVVBitsPerBlock).</p>
 </blockquote>
 <p>It suggests that we can calculate the minimum number of scalable vector elements for a RVV type using <code>RISCV::RVVBitsPerBlock</code>, a magic constant that is <a href="https://github.com/llvm/llvm-project/blob/bf895c714e1f8a51c1e565a75acf60bf7197be51/llvm/include/llvm/TargetParser/RISCVTargetParser.h#L36">set to 64</a>.
-The code comment for <code>RISCV::RVVBitsPerBlock</code> doens&rsquo;t explain a lot, nor is clear what &ldquo;block&rdquo; here means.</p>
-<p>In this short post, I&rsquo;m going to explain how the table is created and the actual purpose of this mistery <code>RISCV::RVVBitsPerBlock</code> constant.</p>
+The code comment for <code>RISCV::RVVBitsPerBlock</code> doesn&rsquo;t explain a lot, nor is clear what &ldquo;block&rdquo; here means.</p>
+<p>In this short post, I&rsquo;m going to explain how the table is created and the actual purpose of this mystery <code>RISCV::RVVBitsPerBlock</code> constant.</p>
 <h3 id="arm-sve----the-origin-of-scalable-vector-types">ARM SVE &ndash; the origin of scalable vector types</h3>
 <p>I know it&rsquo;s weird to start a RISC-V blog post with ARM, but I think it&rsquo;s imperative to understand the origin of scalable vector types in LLVM first.</p>
 <p>ARM introduced SVE (Scalable Vector Extension) about 8 years ago. SVE allows vector registers to scale their size by a certain runtime factor, <code>LEN</code>. The figure below<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup> shows the structure of vector registers in SVE.</p>
@@ -1222,7 +1222,7 @@ The code comment for <code>RISCV::RVVBitsPerBlock</code> doens&rsquo;t explain a
 </div>
 <p>The figure above used a fake base vector of 64 bits, which contains 2 elements in it when SEW=32. Combining with LMUL=4, we get eight 32-bit elements in a single dotted box. Again, vscale value is equal to the number of dotted boxes, but this time, we can easily evaluate it with <code>VLEN / 64</code> &ndash; vscale no longer depends on <code>SEW</code>.</p>
 <p>The size of the fake base vector, 64 bits in this example, is <code>RISCV::RISCVBitsPerBlock</code>. To put it differently, in RISC-V backend, the vscale value is always equal to <code>VLEN / RISCV::RISCVBitsPerBlock</code>.</p>
-<p>It sound a little bit like magic where the <code>SEW</code> factor just suddenly disappears from the equation. But what it really does was simply using the <em>least common multiple (LCM)</em> of all the supported SEW (8, 16, 32, and 64 bits) to &ldquo;tile&rdquo; <code>VLEN</code>. The downside of this design is that we can&rsquo;t support 32-bit <code>VLEN</code> out of the box, which is a known limitation in RISC-V LLVM backend. It sounds a little unusal to have such a small vector size of 32 bits, but apparently <code>Zve32*</code> extensions were created to put vectors into embedded devices, in which case a smaller vector sizes makes more sense.</p>
+<p>It sound a little bit like magic where the <code>SEW</code> factor just suddenly disappears from the equation. But what it really does was simply using the <em>least common multiple (LCM)</em> of all the supported SEW (8, 16, 32, and 64 bits) to &ldquo;tile&rdquo; <code>VLEN</code>. The downside of this design is that we can&rsquo;t support 32-bit <code>VLEN</code> out of the box, which is a known limitation in RISC-V LLVM backend. It sounds a little unusual to have such a small vector size of 32 bits, but apparently <code>Zve32*</code> extensions were created to put vectors into embedded devices, in which case a smaller vector sizes makes more sense.</p>
 <p>Granted, it&rsquo;s not really common to use <code>RISCV::RISCVBitsPerBlock</code> directly, but I thought it&rsquo;s fun to know where it came from and why it&rsquo;s created in the first place. And that&rsquo;s all for this short post! Hope you enjoy.</p>
 <div class="footnotes" role="doc-endnotes">
 <hr>
@@ -1232,8 +1232,8 @@ The code comment for <code>RISCV::RVVBitsPerBlock</code> doens&rsquo;t explain a
 </li>
 </ol>
 </div>
-]]></content:encoded></item><item><title>Scheduling Model in LLVM - Part I</title><link>https://myhsu.xyz/llvm-sched-model-1/</link><pubDate>Mon, 05 Aug 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-model-1/</guid><description>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions. In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&amp;rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)1.</description><content:encoded><![CDATA[<p>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions.
-In order to do that, compilers have to know a whole bunch of information, ranging from individal instruction&rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup>. Which makes it an important factor in performance tuning for low-level code.</p>
+]]></content:encoded></item><item><title>Scheduling Model in LLVM - Part I</title><link>https://myhsu.xyz/llvm-sched-model-1/</link><pubDate>Mon, 05 Aug 2024 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-model-1/</guid><description>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions. In order to do that, compilers have to know a whole bunch of information, ranging from individual instruction&amp;rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)1.</description><content:encoded><![CDATA[<p>Instruction scheduling is essential to modern compilers. It tries to hide latencies and increases the throughput of a straight line code by reordering the enclosing instructions.
+In order to do that, compilers have to know a whole bunch of information, ranging from individual instruction&rsquo;s latency to microarchitecture details. The system that describes these is called a scheduling model. In LLVM, a scheduling model is used by not just the instruction scheduler, but also target-specific optimizations like MachineCombiner and components like MCA (Machine Code Analyzer)<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup>. Which makes it an important factor in performance tuning for low-level code.</p>
 <p>This series is about LLVM&rsquo;s scheduling model, how it interacts / affects other parts of LLVM and how can we fine tune this model for better performance. I&rsquo;ll cover how scheduling models are used in other part of LLVM in later posts, but in this one, I&rsquo;m focusing on the scheduling model itself first, and talk about how to specify scheduling information for individual instructions. Let&rsquo;s start with a really basic example.</p>
 <h3 id="the-basics">The Basics</h3>
 <p>Scheduling models are part of the target definition. They are associated with one or more target processors. Multiple processors can also share the same scheduling model. Take RISC-V as an example, we can find <a href="https://github.com/llvm/llvm-project/blob/fdb9f96fa2a926425bdf8315048db7623d63547d/llvm/lib/Target/RISCV/RISCVSchedSiFive7.td">one</a> of its scheduling models, <code>SiFive7Model</code>, covers a wide array of processors from <code>sifive-e76</code>, a 32-bit microcontroller, to <code>sifive-x280</code>, which is a high-performance processor designed for AI/ML workloads.</p>
@@ -1272,7 +1272,7 @@ First, each operand in an instruction is assigned with a &ldquo;token&rdquo;.</p
 <li>The <code>ReleaseAtCycles</code> field specifies the number of cycles this instruction spends on each hardware resource it uses. In this case, <code>WriteIDIV</code> spends 1 cycle on <code>SiFive7PipeB</code> and 65 cycles on <code>SiFive7IDiv</code></li>
 </ul>
 <p>What about <code>ReadIDIV</code>, the <code>SchedRead</code> instances we saw earlier? By default, LLVM&rsquo;s scheduling model assumes that operand reads finish instantly, so a <code>SchedRead</code> cannot be assigned a latency property nor consuming any cycle the same way as a <code>SchedWrite</code>.</p>
-<p>Which means that effectively, write operands dictate the instruction&rsquo;s scheduling properties and it&rsquo;s expected to repersent majority of the changes an instruction makes to the processor states. So, it&rsquo;s safe to say that in this case, an <code>DIV</code> instruction has a latency of 66 cycles.</p>
+<p>Which means that effectively, write operands dictate the instruction&rsquo;s scheduling properties and it&rsquo;s expected to represent majority of the changes an instruction makes to the processor states. So, it&rsquo;s safe to say that in this case, an <code>DIV</code> instruction has a latency of 66 cycles.</p>
 <p>Alright, so far we have covered the most basic part of a scheduling model, specifically on how to specify the scheduling information for an instruction. We can summarize it into three quick steps:</p>
 <ol>
 <li>Assigning <code>SchedRead</code> and <code>SchedWrite</code> to your instruction</li>
@@ -1394,7 +1394,7 @@ Despite the fact that there are 4 separate schedulers in real hardware, Zen2&rsq
 <h5 id="in-order-core">In-order core</h5>
 <p>So far we have been discussing out-of-order cores, which is one of the primary reasons why we need buffers in the first place. But in-order cores are still a thing, because it dramatically simplifies the chip design and reduces the area, which are top on the list for products like embedded devices. It&rsquo;s also getting more popular in cases where you want save areas for specialized units like BIG vector units or even matrix multiplication units. SiFive&rsquo;s X280, which we&rsquo;ve seen its scheduling model previously, and X390 are good examples, where they save area by adopting in-order design and enjoying a whopping 512- and 1024-bit vector, respectively.</p>
 <p>For in-order cores, you simply set <code>BufferSize</code> and <code>MicroOpBufferSize</code> mentioned earlier to <strong>zero</strong>.
-When an uop is handed to an in-order unit in LLVM&rsquo;s scheduling model, <em>dispatch</em> and <em>issue</em> are conisdered happening at the same time.</p>
+When an uop is handed to an in-order unit in LLVM&rsquo;s scheduling model, <em>dispatch</em> and <em>issue</em> are considered happening at the same time.</p>
 <div style="text-align: center;">
   <picture>
     <source srcset="/images/llvm-sched-model-in-order.dark.svg" media="(prefers-color-scheme: dark)">
