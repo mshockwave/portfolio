@@ -52,7 +52,7 @@ Having (effectively) three available pipes also means that we can dispatch three
 ```
 mul a1, a1, a2
 mul t4, t4, t5
-mul r7, r7, r0
+mul t0, t0, t1
 ```
 What we're interested in here, is how each of them **consumes** processor resources. We can visualize this process with the following resource consumption table:
 
