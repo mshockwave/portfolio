@@ -230,7 +230,7 @@ Looking at the last diagram, we might considering using <code>max(ReleaseAtCycle
   </picture>
 </div>
 <p>So now we only have one thing left: finding the value of <code>D</code>.</p>
-<p>During the left shifting, if we look at each hardware resource in the second instruction <em>individually</em>, each of them needs to move a different distance before touching their counterpart in the first instruction. Using the last setup as example, <code>P0</code> needs to shift 3 cycles left, 6 cycles for <code>P1</code>, and 2 cycles for <code>P2</code>. The value of <code>D</code> would be the minimum among them (i.e. <code>D = 2</code>). Furthermore, the individual shifting amount can be expressed as</p>
+<p>During the left shifting, if we look at each hardware resource in the second instruction <em>individually</em>, each of them needs to move a different distance before touching their counterpart in the first instruction. Using the last setup as example, <code>P0</code> needs to shift 3 cycles left, 4 cycles for <code>P1</code>, and 2 cycles for <code>P2</code>. The value of <code>D</code> would be the minimum among them (i.e. <code>D = 2</code>). Furthermore, the individual shifting amount can be expressed as</p>
 
 
 
