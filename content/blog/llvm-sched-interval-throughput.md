@@ -224,7 +224,7 @@ This distance, `max(ReleaseAtCycles) - D`, is especially important because it's 
 
 So now we only have one thing left: finding the value of `D`.
 
-During the left shifting, if we look at each hardware resource in the second instruction _individually_, each of them needs to move a different distance before touching their counterpart in the first instruction. Using the last setup as example, `P0` needs to shift 3 cycles left, 6 cycles for `P1`, and 2 cycles for `P2`. The value of `D` would be the minimum among them (i.e. `D = 2`). Furthermore, the individual shifting amount can be expressed as
+During the left shifting, if we look at each hardware resource in the second instruction _individually_, each of them needs to move a different distance before touching their counterpart in the first instruction. Using the last setup as example, `P0` needs to shift 3 cycles left, 4 cycles for `P1`, and 2 cycles for `P2`. The value of `D` would be the minimum among them (i.e. `D = 2`). Furthermore, the individual shifting amount can be expressed as
 ```
 (AcquireAtCycle + M) - ReleaseAtCycle
 ```
