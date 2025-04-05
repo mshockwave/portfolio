@@ -63,6 +63,10 @@ weight = 40
 name = "LinkedIn"
 url = "https://www.linkedin.com/in/bekketmcclane/"
 weight = 40
+[[menu.main]]
+name = "Mastodon"
+url = "https://mastodon.social/@mshockwave"
+weight = 40
 
 #[services.rss]
 #limit = 42

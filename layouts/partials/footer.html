@@ -1,0 +1,15 @@
+{{ with .Site.Copyright }}
+  <span>{{ . }}</span>
+{{ end }}
+
+<span>
+  {{ if .Site.Copyright }}|{{ end }}
+  Made with
+  <a href="https://github.com/maolonglong/hugo-simple/">Hugo ʕ•ᴥ•ʔ Simple</a>
+</span>
+
+{{ if not .Site.Params.hideRSSLink }}
+  <span>| <a href="{{ relURL "index.xml" }}">
+    RSS
+  </a></span>
+{{ end }}

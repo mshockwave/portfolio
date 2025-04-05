@@ -1,0 +1,9 @@
+{{ $currentPage := . -}}
+{{ range .Site.Menus.main.ByWeight }}
+  <a
+    rel="me"
+    href="{{ .URL }}"
+    {{ if eq $currentPage .Page }}class="current"{{ end }}
+    >{{ .Name }}</a
+  >
+{{ end }}
