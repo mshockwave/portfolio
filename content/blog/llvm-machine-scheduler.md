@@ -400,3 +400,6 @@ As a consequence, at `CurrCycle = 2` we know instruction D -- a multiplication -
 And that's all the important bits about detecting both data hazard and structural hazard in an in-order core. Namely, the _feasibility_ checks that determine which instructions can go into the available queue.
 
 For the second part of this blog post series, we're going to cover the _profitibility_ checks, which picks a single instruction -- hopefully the optimal one -- from the available queue to schedule next.
+
+### Comments
+Feel free to leave comments at https://github.com/mshockwave/portfolio/discussions/13
