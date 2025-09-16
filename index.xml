@@ -1,4 +1,468 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Sun, 31 Aug 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Calculate Throughput with LLVM's Scheduling Model</title><link>https://myhsu.xyz/llvm-sched-interval-throughput/</link><pubDate>Sun, 23 Mar 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-interval-throughput/</guid><description>From Cambridge Dictionary:
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Tue, 16 Sep 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Machine Scheduler in LLVM - Part I</title><link>https://myhsu.xyz/llvm-machine-scheduler/</link><pubDate>Tue, 16 Sep 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-machine-scheduler/</guid><description>By this point it&amp;rsquo;s evidently that I won&amp;rsquo;t shut up talking about scheduling model in LLVM.1
+I found the fact that it encodes so many low-level details pretty fanicated. It have so much potential and could arguably be used in more places &amp;ndash; but the latter is probably a story for another day, because there is still an elephant in the room:
+What about instruction scheduler, which scheduling model was originally invented for?</description><content:encoded><![CDATA[<p>By this point it&rsquo;s evidently that I won&rsquo;t shut up talking about scheduling model in LLVM.<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup></p>
+<p>I found the fact that it encodes so many low-level details pretty fanicated. It have so much potential and could arguably be used in more places &ndash; but the latter is probably a story for another day, because there is still an elephant in the room:</p>
+<p>What about <strong>instruction scheduler</strong>, which scheduling model was originally invented for?</p>
+<p>In one of my previous <em>Scheduling Model in LLVM</em> posts, I&rsquo;d hinted that a certain scheduling model construct &ndash; the <code>BufferSize</code> of individual processor resource, for example &ndash; might have different <em>interpretations</em> depending on the user of scheduling model.</p>
+<p>Oh well, the instruction scheduler in LLVM happens to be one of the primary users of scheduling models, so learning how instruction scheduler works in LLVM will definitely help us to have a better understanding on the whole scheduling model framework. And this particular post is dedicated to explaining the principles of this fine component in LLVM. First, I&rsquo;m starting with clarifying <em>which</em> instruction schedulers we&rsquo;re going to talk about today &ndash; because there are at least <strong>two</strong> of them that work in completely different ways.</p>
+<h3 id="the-inception-of-machine-scheduler">The inception of Machine Scheduler</h3>
+<p>The idea of the first instruction scheduler in LLVM was pretty straightforward and in some sense, pretty clever: the instruction selection was already performed on a DAG &ndash; namely, SelectionDAG ISel &ndash; so we might as well do the scheduling on our way to turning those DAGs into &ldquo;linear&rdquo; Machine IR. Because part of the linearization is resolving dependencies among nodes in the DAG, and scheduling is all about placing nodes in optimal places under the constraints of these dependencies.</p>
+<p>This design &ndash; sometimes known as DAG scheduler &ndash; stayed until about 2012. Though I haven&rsquo;t been able to find the exact reasons of switching to a new design back then, my guess being that it was just too <em>early</em> to do scheduling right at the beginning of the Machine IR pipeline: many optimizations run at the Machine IR level and even more of them run before register allocation, when most <code>MachineInstr</code> &ndash; the instruction representation in Machine IR &ndash; still operate in SSA form, which makes optimization development a lot easier. We would miss lots of scheduling opportunities if the scheduler couldn&rsquo;t account for those optimized Machine IR.</p>
+<p>To be fair, about 4 years before that, LLVM added a scheduler that runs <em>after</em> register allocation &ndash; a <strong>post-RA</strong> scheduler, which of course operates on Machine IR. Yet scheduling physical registers poses many restrictions when it comes to moving instructions around. Besides, one of the main benefits of instruction scheduling is being able to reduce register pressure <em>before</em> the main register allocation phase. Therefore, at the time it had become clear that scheduling Machine IR <em>right before</em> register allocation was the right way to go forward.</p>
+<p>And that was the story behind <strong>Machine Scheduler</strong> &ndash; the protaganist of this post. Nowadays, almost all LLVM targets chooses to schedule instructions with Machine Scheduler: the <em>pre-RA</em> Machine Scheduler runs right before the register allocation, while the <em>post-RA</em> variant &ndash; not enabled by every targets though &ndash; usually runs relatively late in the codegen pipeline. Both pre- and post-RA variants share a similar codebase, so for simplification, we&rsquo;ll primarily focus on pre-RA scheduling in our discussions here.</p>
+<p>Machine Scheduler has two primary objectives:</p>
+<ul>
+<li>Reduce register pressure</li>
+<li>Improve instruction level parallelism</li>
+</ul>
+<p>For the first objective, we hope to rearrange instructions in a way that the degree of live range overlappings will be kept minimal, hence reduction in the overall register pressure and the number of potential <em>spills</em>.</p>
+<p>The second objective is embodied by at least two items: hiding latency and preventing stalls caused by pipeline hazards in the processor. It is well known that issuing instructions with shorter latency independent to the current critical path &ndash; another way to describe the chain of instructions with the longest latency &ndash; to <em>hide</em> its latency improves throughput and as a consequence, degree of (instruction level) parallelism. But it&rsquo;s only effective if the processor has enough resources, like free slots in the issue queues, to execute those parallel instructions, otherwise stalls and hazards are inevitable.</p>
+<p>Compiler optimizations with multiple objectives like this could get complicated sometimes, so let&rsquo;s start with the high-level picture and look at Machine Scheduler&rsquo;s workflow.</p>
+<h3 id="machine-schedulers-workflow">Machine Scheduler&rsquo;s Workflow</h3>
+<p>By now, we have learned that Machine Scheduler operates on Machine IR &ndash; a &ldquo;linear&rdquo; IR where instructions are organized sequentially in a basic block, similar to LLVM IR. Despite being more intuitive, linear IR is probably not the most ideal way to express <strong>dependencies</strong>, including data dependencies (e.g. registers def-use chain) and control / side-effect dependenceis (e.g. partial orders imposed by memory operations). It&rsquo;s better to have a representation that could <em>explicitly</em> spell out these dependencies.</p>
+<p>Luckily we already have something in our inventory: the <strong>DAG</strong>. Not exactly the SelectionDAG from instruction selection, but the DAG originally designed for the legacy DAG scheduler mentioned earlier, which is known as <em>ScheduleDAG</em>. A ScheduleDAG that has been &ldquo;repurposed&rdquo; in this way is also known as <code>ScheduleDAGInstrs</code>, emphasizing its underlying <code>MachineInstr</code> content. Each <code>ScheduleDAGInstrs</code> represents a single <code>MachineBasicBlock</code> (basic block in MachineIR) and each of the <code>MachineInstr</code> within it is modeled by a data structure called <code>SUnit</code>. To give you a better idea, given the following LLVM IR:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-llvm" data-lang="llvm"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span><span style="color:#cba6f7">define</span> <span style="color:#cba6f7">i64</span> <span style="color:#f5e0dc">@add</span>(<span style="color:#f38ba8">ptr</span> <span style="color:#f5e0dc">%p0</span>, <span style="color:#f38ba8">ptr</span> <span style="color:#f5e0dc">%p1</span>) {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>  <span style="color:#cba6f7">store</span> <span style="color:#cba6f7">i64</span> <span style="color:#fab387">0</span>, <span style="color:#f38ba8">ptr</span> <span style="color:#f5e0dc">%p0</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>  <span style="color:#f5e0dc">%v</span> = <span style="color:#cba6f7">load</span> <span style="color:#cba6f7">i64</span>, <span style="color:#f38ba8">ptr</span> <span style="color:#f5e0dc">%p1</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>  <span style="color:#f5e0dc">%r</span> = <span style="color:#cba6f7">add</span> <span style="color:#cba6f7">i64</span> <span style="color:#f5e0dc">%v</span>, <span style="color:#fab387">87</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>  <span style="color:#cba6f7">ret</span> <span style="color:#cba6f7">i64</span> <span style="color:#f5e0dc">%r</span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>}</span></span></code></pre></div>
+<p>This is its ScheduleDAG:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-scheddag.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-scheddag.light.svg">
+  </picture>
+</div>
+<details >
+  <summary>How to generate this graph</summary>
+
+
+
+
+
+
+<pre tabindex="0"><code class="language-session" data-lang="session">$ llc -mtriple=riscv64 input.ll -view-misched-dags</code></pre>
+<p>This command will actually try to pop up a window to show the GraphViz result, don&rsquo;t worry if you&rsquo;re on a remote server without X server just like me &ndash; it stores the *.dot file in a tmp dir whose path will be shown on screen, just copy that file to wherever you like.</p>
+</details>
+<p>In this graph, the data dependency from <code>add</code> &ndash; represented by <code>SUnit</code> node <code>SU(4)</code> &ndash; to <code>load</code> &ndash; <code>SU(3)</code> &ndash; on its loaded value is shown as a solid arrow. On the other hand, the memory (side-effect) dependency between <code>SU(3)</code> and the store instruction &ndash; <code>SU(2)</code> &ndash; is represneted by a dashed blue arrow.</p>
+<p>We can see more details in individual <code>SUnit</code> by adding <code>-misched-print-dags</code> to the <code>llc</code> command. For instance, here are the details for <code>SU(3)</code>:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>SU(3):   %3:gpr = LD %1:gpr, 0 :: (load (s64) from %ir.p1)
+  # preds left       : 2
+  # succs left       : 1
+  # rdefs left       : 0
+  Latency            : 4
+  Depth              : 1
+  Height             : 5
+  Predecessors:
+    SU(2): Ord  Latency=1 Memory
+    SU(0): Data Latency=0 Reg=%1
+  Successors:
+    SU(4): Data Latency=4 Reg=%3</code></pre>
+<p>Some important properties worth mentioning here:</p>
+<ul>
+<li><strong>Predecessors</strong> and <strong>Successors</strong>: a successor is a <em>dependant</em> <code>SUnit</code> of the current <code>SUnit</code>. Conversly, a predecessor is a <code>SUnit</code> that the current node depends <em>on</em>. All predecessors have to be scheduled before the current <code>SUnit</code> becomes illegible for scheduling. From here we can see that <code>SU(3)</code> is successed by the add instruction, <code>SU(4)</code>, with data dependency and preceded by the store instruction <code>SU(2)</code> with memory dependency (the &ldquo;Ord&rdquo; stands for <em>ordering</em>).</li>
+<li><strong>Latency</strong>: latency of the current <code>SUnit</code>. This value comes from the scheduling model.</li>
+<li><strong>Height</strong>: this is effectively the critical path from the current <code>SUnit</code> to the bottom of this DAG. To put it more formally, it is the <em>maximal</em> sum of latencies from the current node to any node that does not have any successors. In this particular case, it is the sum of latencies from <code>SU(3)</code>, <code>SU(4)</code>, and finally <code>SU(5)</code> (<code>SU(4)</code> has a latency of one, so 4 + 1 = 5).</li>
+<li><strong>Depth</strong>: this is an &ldquo;inverse&rdquo; of Height &ndash; the maximal sum of latencies from any node that has no <em>predecessors</em> to the current node. In this particular case, it is the sum of latencies from <code>SU(1)</code>, <code>SU(2)</code>, and <code>SU(3)</code> (<code>SU(1)</code> has zero latency and <code>SU(2)</code> has a latency of one, hence 0 + 1 = 1).</li>
+</ul>
+<p>The reason there are both <em>height</em> and <em>depth</em> is because Machine Scheduler is able to schedule nodes from both bottom-up (starting from the <em>last</em> instruction in the block) and top-down (starting from the <em>first</em> instruction in the block), so we need some sort of critical path in both directions. For simplification, let&rsquo;s stick to bottom-up for now. That is, we&rsquo;ll focus on the <em>height</em> in these nodes.</p>
+<p>With these properties populated in each <code>SUnit</code>, a <code>ScheduleDAGInstrs</code> is ready to be scheduled by Machine Scheduler. The following diagram shows the high-level workflow of what happens next.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-important-components.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-important-components.light.svg">
+  </picture>
+</div>
+<p>This flow can be seen as a three-phase process: pick a node from the <strong>queue</strong>, put that node onto a simulated <strong>timeline</strong>, update the <strong>states</strong>, and repeat. The keywords with boldface are three of the most components that we&rsquo;re diving deep into later. Let&rsquo;s actually start with the second one, <em>timeline</em>, first.</p>
+<h4 id="scheduling-timeline-and-boundary">Scheduling timeline and boundary</h4>
+<p>In the core of Machine Scheduler&rsquo;s algorithm is a really simple simulation that <em>loosely</em> keeps track of the cycle a node (hence its underlying <code>MachineInstr</code>) is expected to be issued. This helps the scheduler to avoid scheduling a node when either its input data still needs a few cycles to be ready, or the execution resource it needs (e.g. an execution pipe) is fully occupied. Either case might lead to a <em>stalling</em> or more generally speaking, a <em>hazard</em>, in actual execution.</p>
+<p>Therefore, Machine Scheduler is effectively keeping track of the current cycle on a virtual timeline while scheduling more nodes onto it. Here is a simple example:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">Assembly</th>
+<th style="text-align:center">Latency</th>
+<th style="text-align:center">Predecessors</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">A</td>
+<td style="text-align:center">mul r2, r2, r5</td>
+<td style="text-align:center">3</td>
+<td style="text-align:center">-</td>
+</tr>
+<tr>
+<td style="text-align:center">B</td>
+<td style="text-align:center">add r0, r1, r2</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">A</td>
+</tr>
+<tr>
+<td style="text-align:center">C</td>
+<td style="text-align:center">addi r4, r4, 7</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">-</td>
+</tr>
+</tbody>
+</table>
+<p>Assuming we only have three instructions A, B, and C with properties shown in the table above, and we&rsquo;re targeting an <em>infinite</em> wide machine with <em>infinite</em> number of execution pipes &ndash; that is, we can issue however many instructions in the same cycle and they can all be executed.</p>
+<p>On the virtual timeline, there is a pointer <code>CurrCycle</code> pointing to the cycle where the next instruction is subject to issue at. With a clean start, instruction A can naturally be issued at cycle 0 given it has no predecessor (dependency), so A will be the first instruction we schedule. On the other hand, instruction B could not be issued now since it has to wait for the result from instruction A, which is reflected by its predecessor field. That being said, nothing stops instruction C from being issued at the current cycle given there is no dependency it has to wait for, therefore we put C as the next instruction to schedule. Now, our timeline looks like this:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-1.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-1.light.svg">
+  </picture>
+</div>
+<p>With both A and C scheduled, there is only B left now. Since B cannot be issued at cycle 0, we increment <code>CurrCycle</code> by one. But instruction A still hasn&rsquo;t finished at cycle 1, so we keep incrementing <code>CurrCycle</code> until B can be issued / scheduled, which is cycle 3 when A finally finishes. After we schedule B, here is the timeline looks like:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-2.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-2.light.svg">
+  </picture>
+</div>
+<p>Our final schedule sequence would be A, C, B or C, A, B (A and C will be issued at the same cycle so it doesn&rsquo;t matter who goes first).</p>
+<p>Now, let&rsquo;s make this scenario a little more spicy: we&rsquo;re no longer targeting a machine with infinite wide issue width and unlimited number of execution resource. Instead, the machine has a width of 2 and 2 integer execution pipes. A width of 2 means that we can only issue 2 instructions in the same cycle from the processor frontend. For those two integer pipes <code>IEX0</code> and <code>IEX1</code>, only <code>IEX0</code> can do the multiplication. Here are our instructions now:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">Assembly</th>
+<th style="text-align:center">Latency</th>
+<th style="text-align:center">Predecessors</th>
+<th style="text-align:center">Execution pipe</th>
+<th style="text-align:center">Occupancy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">A</td>
+<td style="text-align:center">mul r2, r2, r5</td>
+<td style="text-align:center">4</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">IEX0</td>
+<td style="text-align:center">2</td>
+</tr>
+<tr>
+<td style="text-align:center">B</td>
+<td style="text-align:center">add r0, r1, r2</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">A</td>
+<td style="text-align:center">IEX0, IEX1</td>
+<td style="text-align:center">1</td>
+</tr>
+<tr>
+<td style="text-align:center">C</td>
+<td style="text-align:center">addi r4, r4, 7</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">IEX0, IEX1</td>
+<td style="text-align:center">1</td>
+</tr>
+<tr>
+<td style="text-align:center">D</td>
+<td style="text-align:center">mul r6, r6, r3</td>
+<td style="text-align:center">4</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">IEX0</td>
+<td style="text-align:center">2</td>
+</tr>
+<tr>
+<td style="text-align:center">E</td>
+<td style="text-align:center">addi r7, r7, -5</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">-</td>
+<td style="text-align:center">IEX0, IEX1</td>
+<td style="text-align:center">1</td>
+</tr>
+</tbody>
+</table>
+<p>Let&rsquo;s ignore the &ldquo;Occupancy&rdquo; column for a second. The first three instructions are the same and we add another 2 additional instructions that have no dependency on the results from previous instructions (i.e. no predecessors).</p>
+<p>We handle instruction A and B the same way as before &ndash; that is, only A is scheduled. Now, <code>CurrCycle</code> is still at cycle 0, we have three candidate instructions: C, D, and E &ndash; none of them has dependency on previous instruction&rsquo;s result. One thing we notice is that A is already using <code>IEX0</code>, so instruction D, which is a multiplication, has to wait for it a little bit (we&rsquo;re going back to &ldquo;how long it&rsquo;s gonna wait&rdquo; shortly) and cannot be scheduled. With C and E, we cannot schedule both of them because we no longer has infinite issue width, and A already took one out of two issue slots at the current cycle &ndash; we have to pick one. Let&rsquo;s pick C just like before, shall we? Now the timline looks exactly like one we saw before:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-1.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-1.light.svg">
+  </picture>
+</div>
+<p>Moving <code>CurrCycle</code> to cycle 1, our candidates are again D and E (B is still waiting for A). For D, we face the same problem as before: A is using <code>IEX0</code>&hellip;but wait a second, <em>how long</em> is A gonna use? Remember, most modern processors have <em>pipelined</em> execution unit,<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup> meaning an instruction wouldn&rsquo;t normally &ldquo;occupy&rdquo; the whole execution pipe until it finishes. It only occupies for a duration shorter than its latency &ndash; and such duration is the <em>occupancy</em> column in the table above.</p>
+<p>According to this occupancy table, instruction A &ldquo;occupies&rdquo; <code>IEX0</code> for 2 cycles, which means that instruction D can only be issued after A releases its occupation. That leaves instruction E being the only option to schedule at cycle 1:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-3.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-3.light.svg">
+  </picture>
+</div>
+<p>Moving forward to <code>CurrCycle = 2</code>, we can schedule insturction D as A now releases <code>IEX0</code>:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-4.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-4.light.svg">
+  </picture>
+</div>
+<p>Finally, we schedule instruction B after A &ndash; whose result B depends on &ndash; finishes its execution at cycle 3:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-5.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-5.light.svg">
+  </picture>
+</div>
+<p><strong><em>Congratulation</em></strong>, you just learned the most important outline of Machine Scheduler&rsquo;s core scheduling algorithm!</p>
+<p>This example also <em>foreshadows</em> some of the topics we&rsquo;re covering later. For instance, how candidate instructions are grouped and how to select the best one among those candidates in order to avoid stallings and hazards.</p>
+<p>But let&rsquo;s not get ahead of ourselves, because there is another interesting thing worth talking about on this <code>CurrCycle</code> pointer. This pointer is maintained and kept as part of a larger data structure called <code>SchedBoundary</code>. Personally I would like to call it scheduling <em>frontier</em> instead &ndash; the frontier where you schedule new instructions. This <code>SchedBoundary</code> also contains many other things like the queues carrying candidate instructions which we will talk about shortly, as well as information needed to keep track of critical path and processor resource pressures.</p>
+<p>And the reason it packs these items into a dedicated data structure is because Machine Scheduler can schedule instructions from different <em>directions</em> &ndash; top-down or bottom-up &ndash; as we briefly mentioned earlier. The <code>SchedBoundary</code> for these two schemes behave differently, for instance, in bottom-up scheduling an instruction is only illegible to schedule after all its <em>successors</em> were scheduled. In a <em>bidirectional</em> setup &ndash; yes, Machine Scheduler is able to schedule instructions from both directions <strong>at the same time</strong> &ndash; both &ldquo;top&rdquo; and &ldquo;bottom&rdquo; <code>SchedBoundary</code> exist simultaneously. The scheduler basically picks the single best instruction from these two <code>SchedBoundary</code> and schedules it accordingly.</p>
+<p>To dig a little deeper and compare this with the high-level workflow diagram shown earlier, the part that places newly scheduled instructions / nodes on the timeline mostly happens in the <code>bumpNode</code> and the <code>bumpCycle</code> functions, where <code>bumpNode</code> updates numerous of properties stored inside <code>SchedBoundary</code> and <code>bumpCycle</code> essentially move forward the <code>CurrCycle</code> pointer if needed.</p>
+<p>More broadly speaking, <code>SchedBoundary</code> keeps a <em>state</em> of the current scheduling in the direction it belongs to. And this state directly affects the decision of the next instruction to schedule, which is the main topic we&rsquo;re covering next.</p>
+<h3 id="picking-the-best-candidate">Picking the Best Candidate</h3>
+<p><em>This is where the fun begins!</em><sup id="fnref:3"><a href="#fn:3" class="footnote-ref" role="doc-noteref">3</a></sup></p>
+<p>Not like other parts of Machine Scheduler being unimportant, but &ndash; maybe unsurprisingly &ndash; the overall instruction scheduling quality is heavily influenced by how you pick the next instruction.</p>
+<p>Recall in the example from last section, we always considered all possible candidates before making any selection. Machine Scheduler, of course, does a similar thing and it further divides these candidates into two categories.</p>
+<p>For a node to be considered candidate by Machine Scheduler in the first place, all of its predecessors have to be scheduled already &ndash; if it schedules from top-down. Or, for a bottom-up scheduling, all of the successors have to be scheduled first. Put it differently, these are <em>legality checks</em> to ensure that the correctness between different instructions, embodied by their dependencies, are correctly enforced. After that, two queues are used to store candidates of different stages: the <strong>pending</strong> queue and the <strong>available</strong> queue.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-queues.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-queues.light.svg">
+  </picture>
+</div>
+<p>The transition graph above show the differences between these two queues. In short, pending queue carries candidates that might run into <em>hazards</em> at the current cycle &ndash; we have briefly saw some of those hazard examples earlier, like waiting for either operand values to be availabe or processor resources (execution pipes) it needs to free up. A candidate moves from the pending queue to the available queue once it&rsquo;s deemed hazard-free. We can also considered checks at this stage as <em>feasibility checks</em>, since hazards are not as devastated as an incorrect scheduling yet are generally unwelcomed in this context.</p>
+<p>Once those obstables are cleared, the core algorithm iteratively picks the best candidate from the available queue as the instruction to schedule next. The function that drives this selection process, <code>tryCandidate</code>, goes down those candidates in the queue and compares them pairwise with the following <em>profitability</em> checks:</p>
+<ol>
+<li>Favor the one with lower <strong>register pressure</strong></li>
+<li>For instructions that use <em>latency device</em> resources, pick the one with lower <strong>&ldquo;soft stall&rdquo;</strong> cycles. This is one of the more peculiar yet interesting things in Machine Scheduler that we&rsquo;ll cover later</li>
+<li>Pick the instruction with lower <strong>resource pressure</strong></li>
+<li>Pick the instruction with lower <strong>latency</strong></li>
+<li>All bets are off, use the original program order</li>
+</ol>
+<p>This list omits some less common conditions for simplicity, like an early latency comparison for certain shape of loops,<sup id="fnref:4"><a href="#fn:4" class="footnote-ref" role="doc-noteref">4</a></sup> or special treatment for physical registers. But in any case, <code>tryCandidate</code> applies these condition sequentially in the order shown above and as mentioned in the last bullet item in the list, if none of these tiebreakers works, we&rsquo;re just going to use the original instruction order in the source program. The selected instruction that cames out of this process will be the one that get scehduled. Properties in the corresponding <code>SchedBoundary</code> will be updated accordingly by both <code>bumpNode</code> and <code>bumpCycle</code> as we mentioned earlier.</p>
+<p>That was an overview of how Machine Scheduler selects the optimal candidates. Though it seems that all the fancy selections happen in the available queue, the transition from pending queue to available queue is equally important &ndash; I have personally ran into several cases where suboptimal scheduling occurred because the preferrable instruction was still stuck in the pending queue when it was needed. So for the next section we&rsquo;re going to dive deep into the <em>hazard detection</em> logics that dictate the number of instructions <code>tryCandidate</code> can pick from.</p>
+<h4 id="hazard-detection">Hazard detection</h4>
+<p><em>Hazard</em> in the context of computer architecture usually refers to stalls and flushes happen in the processor pipeline. The most basic and common hazard is the number of instructions or micro-ops (uops) you can issue in a single cycle &ndash; the <em>issue width</em> we saw earlier. So no matter how many instructions or uops you can supply from the processor frontend, only a handful of them can be issued in the current cycle &ndash; the rest of the them have to wait until at least the next cycle, which effectively imposes some sort of stalls.</p>
+<p>Machine Scheduler, of course, account for this hazard, but how does it know the issue width in the first place? This is the part I start to talk about <strong>scheduling model</strong> in LLVM <del>none-stop</del>, because that is the place where Machine Scheduler gains its information from: in LLVM&rsquo;s scheduling model, this width is specified by the <code>IssueWidth</code> field.</p>
+<p>We can see <code>IssueWidth</code> in action with the following Machine IR example and <code>llc</code> command to generate Machine Scheduler <em>trace</em>:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>name: issuewidth_limited
+tracksRegLiveness: true
+body:  |
+  bb.0:
+    liveins: $x9, $x10, $x11, $x12, $x13, $x14
+
+    $x9 = ADD $x9, $x12
+    $x11 = ADDI $x11, 8
+    $x13 = ADD $x13, $x10
+    $x14 = ADDI $x14, 9
+
+    PseudoRET implicit $x9, implicit $x11, implicit $x13, implicit $x14</code></pre>
+<details >
+  <summary>Command to generate scheduler trace</summary>
+
+
+
+
+
+
+<pre tabindex="0"><code class="language-session" data-lang="session">$ llc -mtriple=riscv64 -mcpu=sifive-x280 ./input.mir -run-pass=machine-scheduler \
+      -debug-only=machine-scheduler -misched-prera-direction=topdown \
+      -misched-dump-schedule-trace  -misched-dump-reserved-cycles</code></pre>
+</details>
+<p>This Machine IR snippet has four independent instructions with no data dependencies among them. But since the CPU we&rsquo;re targeting here, <code>sifive-x280</code> only has an issue width of 2, we see the following timeline at the very bottom of the scheduler trace:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>*** Final schedule for %bb.0 ***
+ * Schedule table (TopDown):
+  i: issue
+  x: resource booked
+Cycle              | 0  | 1  |
+SU(0)              | i  |    |
+            PipeAB | x  |    |
+SU(1)              | i  |    |
+            PipeAB | x  |    |
+SU(2)              |    | i  |
+            PipeAB |    | x  |
+SU(3)              |    | i  |
+            PipeAB |    | x  |
+
+SU(0):   $x9 = ADD $x9, $x12
+SU(1):   $x11 = ADDI $x11, 8
+SU(2):   $x13 = ADD $x13, $x10
+SU(3):   $x14 = ADDI $x14, 9</code></pre>
+<details >
+  <summary>Note about this timeline</summary>
+<p>The timeline you see here has been &ldquo;cleaned up&rdquo;, the raw timeline probably looks something like this at the time of writing:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>*** Final schedule for %bb.0 ***
+ * Schedule table (TopDown):
+  i: issue
+  x: resource booked
+Cycle              | 0  | 1  |
+SU(0)              | i  |    |
+VLEN512SiFive7PipeAB | x  |    |
+SU(1)              | i  |    |
+VLEN512SiFive7PipeAB | x  |    |
+SU(2)              |    | i  |
+VLEN512SiFive7PipeAB |    | x  |
+SU(3)              |    | i  |
+VLEN512SiFive7PipeAB |    | x  |</code></pre>
+<p>Because processor resources in <code>sifive-x280</code> have looooong names, due to the fact that scheduler models for several CPUs are actually instantiated from the same scheduler model &ldquo;template&rdquo; called SiFive7Model, and we need a way to distinguish processor resources in these derived models.</p>
+<p>I should probably fix this annoying misaligned timeline.</p>
+</details>
+<p>Where the first two instructions are able to be issued at cycle 0, but rest of the two are deferred to cycle 1.</p>
+<p>Aside from the limited issued width, We&rsquo;re particularly interested in those arose from the processor backend here, including <strong>data</strong> hazard &ndash; stall on waiting for operand data to be available &ndash; and <strong>structual</strong> hazard &ndash; several instructions competing for the same processor resource / execution pipe.</p>
+<p>The most common way modern processors use to eliminate these two types of hazards is by executing instructions <em>out of order</em>. Basically, there is an &ldquo;instruction scheduler&rdquo; similar to the one we&rsquo;re discussing here albeit more precise, embedded in the processor&rsquo;s dispatch stage and issue queues. This <em>hardware</em> scheduler eliminates data hazard by issuing an instruction only when all of its operands are ready; structual hazard, on the other hand, is delt by routing instructions to free execution pipes. Of course, the real implementation is much much more complicated<sup id="fnref:5"><a href="#fn:5" class="footnote-ref" role="doc-noteref">5</a></sup> but this is the gist of how it works.</p>
+<p>That means, for out-of-order cores, instruction scheduler in the <em>compiler</em> barely needs to do anything with hazard &ndash; the hardware scheduler probably does a better job than compilers anyway as hardware has all the information available during runtime. Therefore, the hazard detection in Machine Scheduler is really for <em>in-order</em> cores.</p>
+<p>So what is considered an in-order core from Machine Scheduler&rsquo;s perspective? The scheduling model for an in-order core has the following two properties:</p>
+<ul>
+<li><code>MicroOpBufferSize</code> set to zero</li>
+<li>The <code>BufferSize</code> field in <code>ProcResource</code> and/or <code>ProcResGroup</code> also set to zero</li>
+</ul>
+<p>(Feel free to checkout <a href="/llvm-sched-model-1">this post</a> for more details about these scheduling model components)</p>
+<p>These properties &ndash; mostly surrounding different buffer sizes &ndash; dictates whether Machine Scheduler tries to detect data or structural hazard. Let&rsquo;s see how these two hazard detections work.</p>
+<h5 id="data-hazard">Data hazard</h5>
+<p>To detect data hazard, Machine Scheduler stores an additional <strong>ready cycle</strong> field<sup id="fnref:6"><a href="#fn:6" class="footnote-ref" role="doc-noteref">6</a></sup> in the <code>SUnit</code> to indicate the cycle when <em>all</em> of its operands are ready. It is calculated and updated whenever one of the node&rsquo;s predecessors (in the case of top-down scheduling) or successors (in the case of bottom-up) is scheduled.</p>
+<p>For example, given a <code>SUnit</code> N in a top-down scheduling, it has three predecessors listed below:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center">SUnit</th>
+<th style="text-align:center">ReadyCycle</th>
+<th style="text-align:center">Latency</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">0</td>
+<td style="text-align:center">2</td>
+<td style="text-align:center">4</td>
+</tr>
+<tr>
+<td style="text-align:center">1</td>
+<td style="text-align:center">3</td>
+<td style="text-align:center">1</td>
+</tr>
+<tr>
+<td style="text-align:center">2</td>
+<td style="text-align:center">3</td>
+<td style="text-align:center">2</td>
+</tr>
+</tbody>
+</table>
+<p>This mean that the data from <code>SU(0)</code> will be available at 3 + 4 = cycle 7; data from <code>SU(1)</code> will be available at 3 + 1 = cycle 4. Therefore, the ready cycle for <code>SU(N)</code> equals to <code>max(2+4,3+1,3+2)</code> which is cycle 6.</p>
+<p>With this information, Machine Scheduler is able to postpone moving <code>SU(N)</code> from pending queue to available queue until <code>CurrCycle</code> is at cycle 6 and thus prevent <code>SU(N)</code> from being issued too early only to wait for either <code>SU(0)</code>, <code>SU(1)</code>, or <code>SU(2)</code> to finish.</p>
+<p>So this is how Machine Scheduler detect and prevent data hazard for in-order cores. Although previously we said that hazard detection is only useful for in-order cores and out-of-order cores don&rsquo;t really need it, there is actually an interesting middle-ground in between when it comes to data hazard &ndash; the <em>soft stalls</em> in latency devices.</p>
+<p>In <a href="/llvm-sched-model-1">one</a> of my previous posts about scheduling models, a latency device &ndash; processor resoruces with <code>BufferSize</code> equals to one &ndash; is introduced as being useful to model an in-order execution pipe within an otherwise out-of-order core. Because the buffer can only hold the next instruction that follows &ndash; any additional instructions will be blocked from being dispatched and thus effective <em>serializing</em> the instruction stream.</p>
+<p>The thing is, such <em>single-element</em> buffer still serves as a staging area for the next instruction to wait there until its ready cycle while it&rsquo;s already being dispatched. Since the traditional sense of &ldquo;stalls&rdquo; usually refers to being unable to be dispatched, the instruction in this staging area is not technically stalled. Therefore, instructions running on latency device resources are not subject to all the strict data hazard checks mentioned here and as a matter of fact, not subject to structural hazard checks covered in the following paragraph either.</p>
+<p>However, compared to a full-fledged out-of-order pipe with a much larger buffer, a single-element buffer can only do so much to prevent subsequent instructions from stalling. So the cycles it spends waiting in the staging area &ndash; the &ldquo;<em>soft</em> stalls&rdquo; &ndash; that would otherwise be seen as a data hazard, should be taken into consideration when doing profitibility checks, which we will cover in the next part of this series.</p>
+<p>It is also worth mentioning (pronounced &ldquo;ranting&rdquo;) Machine Scheduler&rsquo;s terminology for what we call latency device resource here &ndash; <em>unbuffered</em> resource. So a <code>SUnit</code> that uses latency device resources will have its <code>SUnit::isUnbuffered</code> flag set. Maybe it&rsquo;s just me, but given out-of-order resources are always buffered, &ldquo;unbuffered&rdquo; sounds awkfully like an in-order resource. Plus, it&rsquo;s not like it&rsquo;s getting rid of buffer completely, conceptually, as we just discussed, there is still a single-element &ldquo;buffer&rdquo;.</p>
+<p>And it certainly doesn&rsquo;t help when the helper function inside <code>SchedBoundary</code> that checks whether the <code>ProcResGroup</code> is an <em>actual</em> in-order resource (i.e. <code>BufferSize = 0</code>) is confusingly named <code>isUnbufferedGroup</code>.</p>
+<p>All confusion (or rage) aside, Machine Scheduler calls an actual in-order resource <em>reserved</em>. For instance, a <code>SUnit</code> that uses in-order resources will have its <code>SUnit::isReserved</code> flag set. And we&rsquo;ll about to see why it&rsquo;s called &ldquo;reserved&rdquo; in the following section.</p>
+<h5 id="structural-hazard">Structural hazard</h5>
+<p>When it comes to structural hazard, Machine Scheduler maintains a <em>counter</em> for each processor resource &ndash; <code>ReservedCycles</code> &ndash; that represents the <em>cycle</em> which the particular resource will be available. Or, using Machine Scheduler&rsquo;s terminology, a resource X is considered <strong>reserved</strong> until the cycle at <code>ReservedCycles[X]</code>. The number of cycles an instruction reserves is its <em>occupancy</em>. In the context of LLVM&rsquo;s scheduling model, this occupancy equals to the duration between its <code>AcquireAtCycles</code> and <code>ReleaseAtCycles</code>. For simplicity, let&rsquo;s discuss the scenario where <code>AcquireAtCycles</code> is always zero for now, therefore occupancy equals to <code>ReleaseAtCycles</code>.</p>
+<p>To give you a more concrete idea, in the earlier example, when instruction A and C were both issued:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-1.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-1.light.svg">
+  </picture>
+</div>
+<p>The <code>ReservedCycles</code> looks like this:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">ReservedCycles</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">IEX0</td>
+<td style="text-align:center">2</td>
+</tr>
+<tr>
+<td style="text-align:center">IEX1</td>
+<td style="text-align:center">1</td>
+</tr>
+</tbody>
+</table>
+<p>Because instruction A &ndash; whose <code>ReleaseAtCycles</code> is 2 cycles &ndash; was issued into <code>IEX0</code> (muliplication can only be executed on <code>IEX0</code>) and C &ndash; whose <code>ReleaseAtCycles</code> equals to 1 &ndash; was issued to <code>IEX1</code>. That&rsquo;s exactly how we know at <code>CurrCycle = 1</code>, we can issue instruction E to <code>IEX1</code>, which at this moment has become available:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched-timeline-3.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched-timeline-3.light.svg">
+  </picture>
+</div>
+<p>Where <code>ReservedCycles</code> at this moment looks like this:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">ReservedCycles</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">IEX0</td>
+<td style="text-align:center">2</td>
+</tr>
+<tr>
+<td style="text-align:center">IEX1</td>
+<td style="text-align:center">2</td>
+</tr>
+</tbody>
+</table>
+<p>As a consequence, at <code>CurrCycle = 2</code> we know instruction D &ndash; a multiplication &ndash; can be issued to <code>IEX0</code>, so on and so forth. Once again, the update on <code>ReservedCycles</code> happens in <code>bumpNode</code>, after the next instruction to schedule has been decided.</p>
+<p>And that&rsquo;s all the important bits about detecting both data hazard and structural hazard in an in-order core. Namely, the <em>feasibility</em> checks that determine which instructions can go into the available queue.</p>
+<p>For the second part of this blog post series, we&rsquo;re going to cover the <em>profitibility</em> checks, which picks a single instruction &ndash; hopefully the optimal one &ndash; from the available queue to schedule next.</p>
+<div class="footnotes" role="doc-endnotes">
+<hr>
+<ol>
+<li id="fn:1">
+<p>My scheduling model series part <a href="/llvm-sched-model-1">one</a> and <a href="/llvm-sched-model-1.5">two</a>; <a href="llvm-sched-interval-throughput/"><em>Calculate Throughput with LLVM&rsquo;s Scheduling Model</em></a>&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:2">
+<p>that being said, complex instructions could be non-pipelined though. The most famous example being <em>divisions</em> &ndash; it&rsquo;s not pipelined in most processors nowadays.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:3">
+<p><a href="https://youtu.be/DcHC1_PUjkY">https://youtu.be/DcHC1_PUjkY</a>&#160;<a href="#fnref:3" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:4">
+<p>Basically, if the <em>acyclic</em> critical path in a loop is longer than its <em>cyclic</em> critical path, the scheduler will more aggresively schedule for latency.&#160;<a href="#fnref:4" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:5">
+<p>modern out-of-order engine tends to take a significant amount of power (and sometimes area).&#160;<a href="#fnref:5" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:6">
+<p>There is actually a ready cycle variable for each <code>SchedBoundary</code>: <code>TopReadyCycle</code> for the top-down and <code>BotReadyCycle</code> for the bottom-up.&#160;<a href="#fnref:6" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+</ol>
+</div>
+]]></content:encoded></item><item><title>Calculate Throughput with LLVM's Scheduling Model</title><link>https://myhsu.xyz/llvm-sched-interval-throughput/</link><pubDate>Sun, 23 Mar 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-sched-interval-throughput/</guid><description>From Cambridge Dictionary:
 Throughput /ˈθruː.pʊt/ (noun)
 an amount of work done in a particular period of time. In architecture-level performance analysis, throughput is usually measured by IPC &amp;ndash; Instruction Per Cycle. The inverse of this property, namely, inverse or reciprocal throughput, is also commonly used to describe the performance characteristics of a sinlge instruction. It&amp;rsquo;s not the time an instruction spends on to finish from start to end &amp;ndash; that is latency &amp;ndash; but more closed to the amount of time it takes to finish a bunch of instructions amortized by their degree of (instruction-level) parallelism.</description><content:encoded><![CDATA[<p>From Cambridge Dictionary:</p>
 <blockquote>
