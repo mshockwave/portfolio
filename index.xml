@@ -439,6 +439,8 @@ VLEN512SiFive7PipeAB |    | x  |</code></pre>
 <p>As a consequence, at <code>CurrCycle = 2</code> we know instruction D &ndash; a multiplication &ndash; can be issued to <code>IEX0</code>, so on and so forth. Once again, the update on <code>ReservedCycles</code> happens in <code>bumpNode</code>, after the next instruction to schedule has been decided.</p>
 <p>And that&rsquo;s all the important bits about detecting both data hazard and structural hazard in an in-order core. Namely, the <em>feasibility</em> checks that determine which instructions can go into the available queue.</p>
 <p>For the second part of this blog post series, we&rsquo;re going to cover the <em>profitibility</em> checks, which picks a single instruction &ndash; hopefully the optimal one &ndash; from the available queue to schedule next.</p>
+<h3 id="comments">Comments</h3>
+<p>Feel free to leave comments at <a href="https://github.com/mshockwave/portfolio/discussions/13">https://github.com/mshockwave/portfolio/discussions/13</a></p>
 <div class="footnotes" role="doc-endnotes">
 <hr>
 <ol>
