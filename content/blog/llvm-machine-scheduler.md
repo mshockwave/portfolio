@@ -9,7 +9,7 @@ By this point it's evidently that I won't shut up talking about scheduling model
 
 [^6]: My scheduling model series part [one](/llvm-sched-model-1) and [two](/llvm-sched-model-1.5); [_Calculate Throughput with LLVM's Scheduling Model_](llvm-sched-interval-throughput/) 
 
-I found the fact that it encodes so many low-level details pretty fanicated. It have so much potential and could arguably be used in more places -- but the latter is probably a story for another day, because there is still an elephant in the room:
+I found the fact that it encodes so many low-level details pretty facinated. It has so much potential and could arguably be used in more places -- but the latter is probably a story for another day, because there is still an elephant in the room:
 
 What about **instruction scheduler**, which scheduling model was originally invented for?
 
