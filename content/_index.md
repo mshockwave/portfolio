@@ -3,7 +3,7 @@ title: "Min Hsu's Homepage"
 ---
 
 #### About Me
-<img src="/images/formal2-tiny.jpg" alt="profile pic" style="width: 35%"/>
+<img src="/images/formal2-tiny.webp" alt="profile pic" style="width: 35%"/>
 
 My name is **Min-Yih "Min" Hsu**. I work as a compiler engineer at [SiFive](https://www.sifive.com/) and am currently based in the beautiful Southern California, United States.
 

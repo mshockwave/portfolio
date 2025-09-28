@@ -1,0 +1,12 @@
+{{- $basename := "" }}
+{{- if .IsNamedParams }}
+  {{- $basename = .Get "basename" }}
+{{- else }}
+  {{- $basename = .Get 0 }}
+{{- end }}
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/{{ $basename }}.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/{{ $basename }}.light.svg">
+  </picture>
+</div>
