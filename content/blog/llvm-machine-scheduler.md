@@ -341,7 +341,7 @@ For example, given a `SUnit` N in a top-down scheduling, it has three predecesso
 |   1   |      3     |    1    |
 |   2   |      3     |    2    |
 
-This mean that the data from `SU(0)` will be available at 3 + 4 = cycle 7; data from `SU(1)` will be available at 3 + 1 = cycle 4. Therefore, the ready cycle for `SU(N)` equals to `max(2+4,3+1,3+2)` which is cycle 6.
+This mean that the data from `SU(0)` will be available at 2 + 4 = cycle 6; data from `SU(1)` will be available at 3 + 1 = cycle 4. Therefore, the ready cycle for `SU(N)` equals to `max(2+4,3+1,3+2)` which is cycle 6.
 
 With this information, Machine Scheduler is able to postpone moving `SU(N)` from pending queue to available queue until `CurrCycle` is at cycle 6 and thus prevent `SU(N)` from being issued too early only to wait for either `SU(0)`, `SU(1)`, or `SU(2)` to finish.
 
