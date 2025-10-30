@@ -7,6 +7,8 @@ type = "single"
 <u>Min-Yih Hsu</u>. “LLVM Techniques, Tips, and Best Practices Clang and Middle-End Libraries: Design Powerful and Reliable Compilers Using the Latest Libraries and Tools from LLVM”. _Packt Publishing_ (2021). [Amazon Link](https://a.co/d/0AXkEdI).
 
 ### Paper and Talk
+  - <u>Min-Yih Hsu</u>. "Scheduling Model in LLVM: Past, Present, and Future". _LLVM Developers' Meeting_ (2025). [[Slides]](/archives/llvm-devmtg-2025-sched-model-tutorial.pdf)
+  - <u>Min-Yih Hsu</u>. "New llvm-exegesis Support for RISC-V Vector Extension". _LLVM Developers' Meeting_ (2024). [[Recording]](https://youtu.be/h2tDWoTWUnw?si=WQ4GDgAQ9eJrYTZp) [[Slides]](/archives/llvm-devmtg-2024-rvv-exegesis.pdf)
   - <u>Min-Yih Hsu</u>, Felicitas Hetzelt, David Gens, Michael Maitland, and Michael Franz. "A Highly Scalable, Hybrid, Cross-Platform Timing Analysis Framework Providing Accurate Differential Throughput Estimation via Instruction-Level Tracing" In _Proceedings of ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering (ESEC/FSE)_ 2023. [https://doi.org/10.1145/3611643.3616246](https://doi.org/10.1145/3611643.3616246)
   - <u>Min-Yih Hsu</u>, David Gens, Michael Franz. “MCA Daemon: Hybrid Throughput Analysis Beyond Basic Blocks”. _EuroLLVM Developers Meeting_ (2022). [[Recording]](https://youtu.be/ZGEP7JEIKNo)[[Slides]](https://llvm.org/devmtg/2022-05/slides/2022EuroLLVM-MCA-Deamon.pdf)
   - <u>Min-Yih Hsu</u>, Stan Kvasov, and Vince Del Vecchio. “Souper-Charging Peepholes with Target Machine Info”. _LLVM Developers Meeting_ (2019). [[Recording]](https://youtu.be/5eSOWM0upN8)[[Slides]](https://llvm.org/devmtg/2019-10/slides/Hsu-Souper-ChargingPeepholes.pdf)
