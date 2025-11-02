@@ -1,4 +1,352 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Fri, 26 Sep 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Machine Scheduler in LLVM - Part I</title><link>https://myhsu.xyz/llvm-machine-scheduler/</link><pubDate>Tue, 16 Sep 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-machine-scheduler/</guid><description>By this point it&amp;rsquo;s evidently that I won&amp;rsquo;t shut up talking about scheduling model in LLVM.1
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Min Hsu's Homepage</title><link>https://myhsu.xyz/</link><description>Recent content on Min Hsu's Homepage</description><generator>Hugo -- gohugo.io</generator><language>en</language><managingEditor>min@myhsu.dev (Min-Yih Hsu)</managingEditor><webMaster>min@myhsu.dev (Min-Yih Hsu)</webMaster><copyright>© 2024 Min-Yih Hsu</copyright><lastBuildDate>Sat, 01 Nov 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://myhsu.xyz/index.xml" rel="self" type="application/rss+xml"/><item><title>Machine Scheduler in LLVM - Part II</title><link>https://myhsu.xyz/llvm-machine-scheduler-2/</link><pubDate>Sat, 01 Nov 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-machine-scheduler-2/</guid><description>In the first part of this series, we covered the basic workflow of Machine Scheduler &amp;ndash; LLVM&amp;rsquo;s predominated instruction scheduling framework &amp;ndash; and learned that an instruction could go through three phases of checks before it finally got scheduled: legality check, feasibility check, and profitibility check.
+The first two phases &amp;ndash; which were explained in details in that post &amp;ndash; have direct connections with program correctness and avoiding potential processor hazard, respectiviely.</description><content:encoded><![CDATA[<p>In the <a href="/llvm-machine-scheduler">first part</a> of this series, we covered the basic workflow of Machine Scheduler &ndash; LLVM&rsquo;s predominated instruction scheduling framework &ndash; and learned that an instruction could go through three phases of checks before it finally got scheduled: <strong>legality</strong> check, <strong>feasibility</strong> check, and <strong>profitibility</strong> check.</p>
+<p>The first two phases &ndash; which were explained in details in that post &ndash; have direct connections with program correctness and avoiding potential processor hazard, respectiviely. The last phase tries to pick the <em>optimal</em> candidate that&rsquo;ll hopefully reduce the register pressures and increase the instruction level parallelism (ILP) &ndash; the two primary goals for instruction scheduling in LLVM. In this post, we&rsquo;re going to dive deep into this profitibility check phase.</p>
+<h3 id="profitibility-checks">Profitibility Checks</h3>
+<p>Making the optimal choice has always been a difficult problem in computer science (as in real life). There is a whole big field telling you how to optimize for a specific set of constraints &ndash; usually with a cost of non-trivial amount of runtime, however. Machine Scheduler, just like other parts of LLVM, prioritizes speed and perhaps maintainability over finding the absolute optimal instruction.</p>
+<p>And that, is the rationale behind the design of <code>tryCandidate</code> &ndash; specifically its fixed set of comparisons done on candidates &ndash; we&rsquo;ve shown in the previous post. Among those heuristics and comparisons, we are particularly interested in two of them: favor the candidate with a lower <em>register pressure</em> and pick the instruction with lower <em>resource pressure</em>. As they have a more direct connection with the goals of instruction scheduling mentioned earlier. Plus, both out-of-order and in-order cores put attentions on these items. So, without further ado, let&rsquo;s look at the register pressure heuristics first.</p>
+<h4 id="register-pressure">Register pressure</h4>
+<p>I always like to describe register pressure as a synonym for the number of (concurrent) <strong>live intervals</strong> at a given point in the program.</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-reg-pressure.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-reg-pressure.light.svg">
+  </picture>
+</div>
+<p>In the diagram above, each vertical bars on the left is an live interval for a specific register. A live interval starts from a register definition and ends at its <em>last</em> use that appears right before another register (re)definition. In this simplified scenario, counting the number of overlapping live intervals at a certain point &ndash; either before or after an instruction &ndash; gives you its register pressure.</p>
+<p>Live range is basically the duration where a reigster is <em>reserved</em> and blocked out from any other purposes. Therefore, if too many registers are being booked at the same time, the likelyhood a register spilling happens increases &ndash; that&rsquo;s why register pressure is a useful tool to gauge the degree of register spillings.</p>
+<p>In reality, LLVM tracks register pressure by groups: registers with similar characteristics are put in the same <strong>pressure set</strong> and maintains its own pressure value. Take <em>scalar</em> and <em>vector</em> registers as an example, they are usually assigned into different pressure sets. The pressure induced by any scalar registers are aggregated into a same pressure value; a similar logics applies to vector registers:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-reg-pressure2.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-reg-pressure2.light.svg">
+  </picture>
+</div>
+<p>The number of concurrent live intervals, and hence register pressure, obviously depends on the structure of instructions and their <em>ordering</em> &ndash; but then back to what we&rsquo;re doing here, how should we make an estimation on the prospective register pressure even <em>before</em> all the instructions are scheduled?</p>
+<p>As it turns out, in most scenarios Machine Scheduler cares more about the register pressure <strong>difference</strong> made by a single instruction. The scheduler initializes each instruction with a rought &ldquo;guess&rdquo; on how it might impact the overall pressure, which is stored in a data structure called <code>PressureDiff</code>. It is an array indexed by pressure set ID in which individual element expresses the degree or the quantity of pressure change.</p>
+<p>Each <code>PressureDiff</code> associated with the instruction might get updated during the scheduling, but ultimately when an instruction is compared against others on register pressure inside <code>tryCandidate</code>, its <code>PressureDiff</code> is applied on top of the <em>current</em> register pressure at that moment. For example, if instruction A could increase scalar registers&rsquo; pressure by 2, and the current scalar pressure set already has a pressure of 4, then the prospective new pressure in the scalar pressure set will be 6, easy! This gives scheduler an idea on whether this instructions increases or decreases the <em>overall</em> pressure (again, among the scheduled instructions at that moment) and how much does it change. More specifically, the scheduler wants to know the change on three metrics:</p>
+<h5 id="excess-pressure">Excess pressure</h5>
+<p>How much does the new pressure goes overboard compare to the old pressure. While this sounds exactly like the pressure difference of an individual instruction we just talked about &ndash; and in some cases, it is &ndash; there is a catch here: excess pressure is &ldquo;filtered&rdquo; by a per-pressure set <em>threshold</em> value.</p>
+<p>The idea is that if we care about every tiny bit of reigster pressure changes, we might lose the big picture because those are just noise. By setting a lower bound threshold, we now calculate the excess pressure with only the pressure values that go over that line:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>ExcessP = max(NewP, Threshold) - max(OldP, Threshold)</code></pre>
+<p>By this formula, if both new and old pressures are below the threshold, excess pressure would be zero &ndash; because both of them are considered noise in this case; if only <em>one</em> of the pressures goes over the threshold, the difference taken in this case will be confined by the threshold &ndash; either <code>Threshold - OldP</code> or <code>NewP - Threshold</code>. In other words, this formula is effectively a <em>damper</em> that prevents the pressure difference from oscillating too much.</p>
+<h5 id="critical-max-pressure">Critical Max pressure</h5>
+<p>The next register pressure related heuristic compares the new register pressure (i.e. <code>NewP</code>) with the maximal pressure we have seen so far in a specific pressure set. To be more specific, this is the maximal pressure from <em>both</em> the top and bottom <code>SchedBoundary</code> that are going on at this moment, so critical max pressure &ndash; as it&rsquo;s called in Machine Scheduler &ndash; is truely the maximal pressure of the entire scheduling region at the time.</p>
+<p>The value we&rsquo;re interested in here, similar to excess pressure, is the difference between <code>NewP</code> and critical max pressure. But unlike excess pressure where the pressure difference can be nagative &ndash; namely, decreasing the pressure &ndash; we only consider the difference when <code>NewP</code> is larger than critical max pressure.</p>
+<h5 id="current-max-pressure">Current Max pressure</h5>
+<p>As confusing as the naming can go, <em>current</em> max pressure represents the maximal pressure of a pressure set in the <strong>original</strong>, unscheduled program. Seriously, people should just call it &ldquo;original max pressure&rdquo;. Aside from that, we also take the difference between <code>NewP</code> and current max pressure, if the former is larger than the latter.</p>
+<p>These are the three metrics <code>tryCandidate</code> really cares about when it comes to the per-instruction register pressure impact. The execess pressure is always used before other two, as it represents the before v.s. after pressure of a specific pressure set, which is much more meaningful in most cases.</p>
+<p>Before wrapping up this part, I would like to dive a little more into the technical details and breakdown the meanings of some key data structures &ndash; most of them were already covered in the previous passages &ndash; that have even <em>more</em> confusing names than &ldquo;current max pressure&rdquo; v.s. &ldquo;critical max pressure&rdquo; in this part of the Machine Scheduler 🙃:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center">Class Name</th>
+<th style="text-align:center">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center"><code>PressureChange</code></td>
+<td style="text-align:center">The quantity of (potential) register pressure change on a specific pressure set</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>PressureDiff</code></td>
+<td style="text-align:center">An array of <code>PressureChange</code> , indexed by <em>pressure set ID</em>, made by a single instruction</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>PressureDiffs</code></td>
+<td style="text-align:center">A data structure that maps from an <em>instruction</em> to its <code>PressureDiff</code></td>
+</tr>
+<tr>
+<td style="text-align:center"><code>RegPressureDelta</code></td>
+<td style="text-align:center">This specialized data structure only carries the three metrics Machine Scheduler cares about. Namely, <em>excess pressure</em>, <em>critical max pressure</em>, and <em>current max pressure</em></td>
+</tr>
+<tr>
+<td style="text-align:center"><code>RegisterPressure</code></td>
+<td style="text-align:center">Despite its name, this data structure only carries the maximal register pressure of each pressure set<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup> in the current region</td>
+</tr>
+</tbody>
+</table>
+<p>Next, we&rsquo;re looking at how <code>tryCandidate</code> picks the candidate with a lower <strong>resource pressure</strong>.</p>
+<h4 id="resource-pressure">Resource pressure</h4>
+<p>To explain resource pressure, we can actually draw an analogy from register pressure we just learned: <em>pressure sets</em> are the smallest units to keep track of registers pressures in LLVM. Machine Scheduler, as we just saw, tries really hard to prevent the pressure within a single pressure set from exceeding a certain <em>threshold</em>.</p>
+<p>Here, individual processor resource (i.e. pipe) is like a register pressure set. And the goal of reducing resource pressure here, is to prevent the accumulated <strong>occupancy cycles</strong> within a processor resource from exceeding a certain <em>threshold</em>.</p>
+<p>This threshold is the total latency we have scheduled so far &ndash; which is roughly equal to the <strong>critical path length</strong>. Critical path, by definition, is the number of cycles in the longest serial execution path. In a perfectly parallelized system, the total execution time of the current region will be bounded by the ciritical path length.</p>
+<p>Well, <strong>IF</strong> we have a perfectly parallelized system, that is. But such a theoritical upperbound is the <em>exact</em> thing we need here to gauge how well we&rsquo;re doing ILP-wise in the region we&rsquo;re currently scheduling &ndash; whenever the occupancies of a single resource go over this value, there might still be rooms for running more instructions in parallel.</p>
+<p>In other words, conceptually, we want to avoid <em>over-concentrated</em> pipes like this:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-resource-pressure1.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-resource-pressure1.light.svg">
+  </picture>
+</div>
+<p>And prefer more uniform <em>distribution</em> among all the available pipes:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-resource-pressure2.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-resource-pressure2.light.svg">
+  </picture>
+</div>
+<p>Without a doubt, the accumulated occupancies in each pipes plays a key role here. However, let&rsquo;s not forget that each pipe might be built differently in terms of its throughput so that we have to <em>normalize</em> these occupancy values to get a fair comparison.</p>
+<p>To be more specific, we&rsquo;re talking about the number of units in a <code>ProcResource</code>:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">PipeA</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">PipeB</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">4</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>def <span style="color:#89dceb">PipeC</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">2</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>Recall in <a href="/llvm-sched-model-1.5/#number-of-units-in-a-procresource">one of my previous blog posts</a> about scheduling model, a processor resource that has more than one unit, like</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">PipeB</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">4</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>can be thought as having multiple identical execution pipes:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">PipeB_0</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>def <span style="color:#89dceb">PipeB_1</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>def <span style="color:#89dceb">PipeB_2</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>def <span style="color:#89dceb">PipeB_3</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;</span></span></code></pre></div>
+<p>An instrucion consumes one of the execution pipes for a duration of its occupancy. The unit of occupancy is cycle per instruction (hence the name of <em>inverse</em> throughput), but take this case as an example, the occupancy value describes not cycle per instruction but cycle per <em>four</em> instructions, as we can run another 3 instructions at the same time. In other word, if an instruction has a <strong>nominal</strong> occupancy of <code>N</code> cycles, its <strong>effective</strong> occupancy on <code>PipeB</code> will be <code>N / 4</code>.</p>
+<p>As a consequence, the effective occupancy of the same instruction on <code>PipeA</code>, <code>PipeB</code>, and <code>PipeC</code> would be <code>N / 1</code>, <code>N / 4</code>, <code>N / 2</code>, respectively. This would be the occupancy value we use to check whether a single resource is over concentrated as introduced earlier. However, compiler itself &ndash; as a software &ndash; tries to avoid floating point numbers as much as possible, so we&rsquo;re gonna normalize it by multiplying them with their least common multiple (LCM), yielding <code>4 * N</code>, <code>N</code>, and <code>2 * N</code>, respectively.</p>
+<p>Now, in addition to the number of units, which is proportional to the result throughput in each pipe, we also need to consider the throughput on the other end of the pipe &ndash; the <em>input</em> rate, which is modeled by the <strong>issue width</strong>. Issue width represents how many instrutions / uops could be pumped into these pipes per cycle. Combining issue width with the number of units per hardware reousrce, we can assign an <em>ingress</em> and <em>egress</em> ratio for each resource. For example, given an issue width of 3, <code>PipeB</code> has an ingress v.s. egress ratio of <code>3 : 4</code>. This ratio is an important invariant we have to keep across normalization.</p>
+<p>The easiest way to preserve this ratio is by taking issue width into the LCM calculation as well:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>LCM(IssueWidth, NumOfUnits_0, NumOfUnits_1, ..., NumOfUnits_N)</code></pre>
+<p>This LCM value is also known as <strong>latency factor</strong>. From the latency factor we can further derive <strong>resource factor</strong>, the factor we use to normalize occupancies. For example, for an instruction that runs on resource <code>X</code>, its <em>normalized</em> occupancy can be calculated as:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>ResourceFactor      = LatencyFactor / NumOfUnits_X
+NormalizedOccupancy = Occupancy * ResourceFactor</code></pre>
+<p>The intuition behind this is that issue width represents the number of ingress instructions per cycle, so for an issue width of 3, feeding in an instruction takes <code>1 / 3</code> cycle &ndash; this is the equivalent of effective occupancies like <code>N / 4</code> or <code>N / 2</code> we saw earlier, except that instead of describing how many cycles it occupies, it describes how many cycles it takes to ingest. As a consequence, by taking issue width into the LCM, we can effectively scale the ingress <em>and</em> egress throughputs at the same time.</p>
+<p>Let&rsquo;s wrap up this section with an example to show how every components comes together. First, let&rsquo;s spell out the hardare resource definitions we&rsquo;ve been using so far:</p>
+
+
+
+
+
+
+<div class="highlight"><pre tabindex="0" style="color:#cdd6f4;background-color:#1e1e2e;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c++" data-lang="c++"><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">1</span><span>def <span style="color:#89dceb">FooSchedMachineModel</span> : SchedMachineModel {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">2</span><span>    let IssueWidth <span style="color:#89dceb;font-weight:bold">=</span> <span style="color:#fab387">3</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">3</span><span>}
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">4</span><span>
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">5</span><span>let SchedModel <span style="color:#89dceb;font-weight:bold">=</span> FooSchedMachineModel in {
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">6</span><span>    def <span style="color:#89dceb">PipeA</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">1</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">7</span><span>    def <span style="color:#89dceb">PipeB</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">4</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">8</span><span>    def <span style="color:#89dceb">PipeC</span> : ProcResource<span style="color:#89dceb;font-weight:bold">&lt;</span><span style="color:#fab387">2</span><span style="color:#89dceb;font-weight:bold">&gt;</span>;
+</span></span><span style="display:flex;"><span style="white-space:pre;-webkit-user-select:none;user-select:none;margin-right:0.4em;padding:0 0.4em 0 0.4em;color:#7f849c">9</span><span>}</span></span></code></pre></div>
+<p>The latency factor is equal to</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>LCM(/*issue width=*/3,
+    /*PipeA units=*/1,
+    /*PipeB units=*/2,
+    /*PipeC units=*/4) = 12</code></pre>
+<p>And the resource factor of each pipes are:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">Resource Factor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">PipeA</td>
+<td style="text-align:center">12 / 1 = 12</td>
+</tr>
+<tr>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center">12 / 4 = 3</td>
+</tr>
+<tr>
+<td style="text-align:center">PipeC</td>
+<td style="text-align:center">12 / 2 = 6</td>
+</tr>
+</tbody>
+</table>
+<p>On the instruction side, here are the resource usages, occupancies, and latencies we will use in this example:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center">Instruction</th>
+<th style="text-align:center">Resources</th>
+<th style="text-align:center">Occupancy</th>
+<th style="text-align:center">Latency</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center"><code>ld</code></td>
+<td style="text-align:center">PipeC</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">3</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>mul</code></td>
+<td style="text-align:center">PipeA</td>
+<td style="text-align:center">2</td>
+<td style="text-align:center">3</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>add</code></td>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">1</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>slli</code></td>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center">1</td>
+<td style="text-align:center">1</td>
+</tr>
+</tbody>
+</table>
+<p>Given these conditions, assuming we already have the following instructions scheduled:</p>
+
+
+
+
+
+
+<pre tabindex="0"><code>ld  a0, 0(s0)
+mul t0, s0, s1
+add a1, a0, a0</code></pre>
+<p>The critical path in this case would be domindated by the load instruction, <code>ld  a0, 0(s0)</code>, therefore, the <strong>nominal</strong> critical path length is equal to 3 cycles<sup id="fnref:2"><a href="#fn:2" class="footnote-ref" role="doc-noteref">2</a></sup>. But remember, we have to scale this number with the latency factor, so the <strong>normalized</strong> critical path length is <code>12 * 3 = 36</code> cycles.</p>
+<p>Similarly, we have to normalize the occupancy of individual instructions with their corresponding resource factor:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center">Instruction</th>
+<th style="text-align:center">Resources</th>
+<th style="text-align:center">Normalized Occupancy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center"><code>ld</code></td>
+<td style="text-align:center">PipeC</td>
+<td style="text-align:center">6 * 1 = 6</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>mul</code></td>
+<td style="text-align:center">PipeA</td>
+<td style="text-align:center">12 * 2 = 24</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>add</code></td>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center">3 * 1 = 3</td>
+</tr>
+<tr>
+<td style="text-align:center"><code>slli</code></td>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center">3 * 1 = 3</td>
+</tr>
+</tbody>
+</table>
+<p>As a consequence, the <em>accumulated</em> occupancies for each pipe at this moment are:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:center"></th>
+<th style="text-align:center">Executed Instruction(s)</th>
+<th style="text-align:center">Accumulated Occupancies</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:center">PipeA</td>
+<td style="text-align:center"><code>mul t0, s0, s1</code></td>
+<td style="text-align:center">24</td>
+</tr>
+<tr>
+<td style="text-align:center">PipeB</td>
+<td style="text-align:center"><code>add a1, a0, a0</code></td>
+<td style="text-align:center">3</td>
+</tr>
+<tr>
+<td style="text-align:center">PipeC</td>
+<td style="text-align:center"><code>ld a0, 0(s0)</code></td>
+<td style="text-align:center">6</td>
+</tr>
+</tbody>
+</table>
+<p>Now, assuming we have two candidates to pick from for the next instruction to schedule:</p>
+<ul>
+<li><code>mul t1, s2, s1</code></li>
+<li><code>slli a2, a2, 4</code></li>
+</ul>
+<p>If we pick <code>mul t1, s2, s1</code> as the next instruction to schedule, the accumulated occupancy of <code>PipeA</code> becomes 48 cycles, which exceeds the critical path length, 36 cycles, by a large margin. On the other hand, if we pick <code>slli a2, a2, 4</code>, none of the three pipes&rsquo; accumulated occupancies will be greater than 36 cycles.</p>
+<p>Therefore, it&rsquo;s more desired to pick <code>slli a2, a2, 4</code> over the other.</p>
+<p>If we try to picture what will actually happen in the hardware, for the case where we pick <code>mul t1, s2, s1</code>, this instruction has no choice but stacks on top of the previous muliplication instruction, hence increasing the occupancy of <code>PipeA</code>:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-resource-pressure-timeline1.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-resource-pressure-timeline1.light.svg">
+  </picture>
+</div>
+<p>On the other hand, in the case where we pick <code>slli a2, a2, 4</code>, hardware can actually <strong>distribute</strong> it into one of the four pipes within <code>PipeB</code>. Therefore, the effective occupancy in <code>PipeB</code> does not increase:</p>
+<div style="text-align: center;">
+  <picture>
+    <source srcset="/images/llvm-misched2-resource-pressure-timeline2.dark.svg" media="(prefers-color-scheme: dark)">
+    <img src="/images/llvm-misched2-resource-pressure-timeline2.light.svg">
+  </picture>
+</div>
+<p>So all the normalization processes we discussed early are actually just trying to model this distrbution capability (or the lack of it) in a <em>numeric</em> way &ndash; &ldquo;penalize&rdquo; resources of small number of units (i.e. low distribution capability) with high resource factor and reward them with low resource factor otherwise.</p>
+<h3 id="so-whats-next">So, what&rsquo;s next?</h3>
+<p>Perhaps surprisingly, I think there are actually many works we can do for in-order processors in this area!</p>
+<p>Compared to other parts of LLVM backend, Machine Scheduler hasn&rsquo;t received many improvements or even just changes in the past decade. I am convinced that this is caused by the fact that out-of-order processors have dominated the market and hence the compiler development space in the past few decades or so &ndash; and out-of-order processors are much more agnostic or resilient to the instruction scheduling quality, as the whole premises of out-of-order-ness is to do the exactly same scheduling in hardware, during runtime, yet with more precision. In other words &ndash; it&rsquo;s usually not worth the efforts to improve Machine Scheduler for out-of-order processors. To be fair, reducing the number of register spillings (through instruction scheduling) still helps, but even on that regards, missing a few register spillings generally won&rsquo;t make a huge differernt performance-wise on modern out-of-order processors.</p>
+<p>It&rsquo;s a different story for in-order processors, of course. Stallings and register spillings both make huge impacts on performance, and therefore the importance of instruction scheduling quality for these processors. Sadly in the past few decades, most in-order processors are embedded ones, where either the hardware is not complicated enough to warrant more advanced scheduling techniques, or the fact that performance altogether is just not the first priority to them. All of these factors contribute to the relatively staggering development in Machine Scheduler and to some extent, the scheduling model framework.</p>
+<p>That brings us to the first item I think Machine Scheduler can do better on in-order cores &ndash; it&rsquo;s a little <em>too pessimistic</em> on stallings. As we learned in the <a href="/llvm-machine-scheduler">first part</a> of this series, scheduling candidates will stay in the pending queue until all of its hazards are cleared, at which point they&rsquo;ll migrate to the available queue. On one hand, this matches the expectations of hardware: hazards <em>are</em> devastating for in-order cores; yet on the other hand, we might be missing out many opportunities where we rather take the penalty from stallings because doing so can dramatically reduce the register pressure!</p>
+<p>Let&rsquo;s say an instruction might stall for 2 cycles due to data hazards, in the current design it&rsquo;ll stay in pending queue until 2 cycles later. But as it turns out, if we put it into the available queue right away, the scheduling algorithm will realize that it can help us to lower the register pressure and effectively eliminate a register spill (usually a vector register spill) that would have costed us <strong>10 cycles</strong>! In this case we definitely want to trade hazard preventions for less register spills.</p>
+<p>This shortcoming could be circumvented by using <code>BufferSize = 1</code>. As we introduced earlier this configuration only imposes &ldquo;soft&rdquo; stalls that still allow instruction candidates to move from the pending queue to the available queue in the presence of hazards. In other words, Machine Scheduler schedules these in-order instructions &ldquo;out-of-order-ly&rdquo;.</p>
+<p>Though <code>BufferSize = 1</code> does give us more flexibility, foregoing <em>any</em> kinds of hazard detection while some of them still brings, as we mentioned earlier, devastating performance impacts on in-order processors is hardly a general solution &ndash; it&rsquo;s going a little too <em>optimistic</em>. Just like everything in real life, we have to strike a balance here.</p>
+<p>And that brings us to the second topic &ndash; potential improvements for <code>tryCandidate</code>. As we learned from the previous post, <code>tryCandidate</code> decides whether an instruction is more profitable over the other by going through a list of criterias &ndash; register pressure, resource pressure, latency etc. &ndash; in <strong>a fixed order</strong>. That fixed order could cause some problem. Similar to the trade off between a 2-cycle stalling and a 10-cycle reduction due to eliminating a register spill we just mentioned, what if we have two instructions <code>A</code> and <code>B</code>, where instruction <code>A</code> has a slightly better register pressure than <code>B</code> but might cause serious trouble on resource pressure. If register pressure is checked before resource pressure &ndash; which is actually what we&rsquo;re doing at this moment &ndash; then <code>tryCandidate</code> will fail to see the resource pressure red flag on <code>A</code>!</p>
+<p>Of course, one can argue that this issue can boil down into the (in)famous phase-ordering problem that has plagued compiler development since the beginning of the time. Yet I argue that this is not the end of the world: we can improve this by assigning each of these factors &ndash; register pressure, resource pressure, latency etc. &ndash; a <strong>cost</strong>, and comparing against the <em>aggregated</em> (and probably weighted) cost of each instruction candidate. The idea is that we can account for <em>every</em> factors we care about, rather than just some of them, with this method.</p>
+<p>Last but not the least, Machine Scheduler is pretty complicated &ndash; but it certainly doesn&rsquo;t help when the debug messages (i.e. <code>-debug-only=machine-scheduler</code>) are cryptic and relatively unstructured. Granted, the amount of information it tries to convey is <em>massive</em>, yet I think we should invent a better framework to <strong>trace</strong> development messages in this scale, as neither the current debug message framework nor the optimization remarks frameowrk seem fit here.</p>
+<h3 id="epilogue">Epilogue</h3>
+<p>This is the second and last part of this series. I hope I shed some lights on how Machine Scheduler decides which instruction is more profitable and the rationale behind it. Just like everything else in LLVM, all the things I&rsquo;ve been talking here in this series are just the tip of an iceberg &ndash; I unfortunately has to omit lots of great topics due to the length and deep beneath this iceberg, there are still many areas in Machine Scheduler we can improve as I illustrated in the last section.</p>
+<div class="footnotes" role="doc-endnotes">
+<hr>
+<ol>
+<li id="fn:1">
+<p>As well as the live-in and live-out registers in this region.&#160;<a href="#fnref:1" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+<li id="fn:2">
+<p>In a top-down schedule, the critical path length is effectively defined as the number of cycles up to the point where the last instruction was <em>issued</em>, so the latency of <code>add a1, a0, a0</code> is not accounted for.&#160;<a href="#fnref:2" class="footnote-backref" role="doc-backlink">&#x21a9;&#xfe0e;</a></p>
+</li>
+</ol>
+</div>
+]]></content:encoded></item><item><title>Machine Scheduler in LLVM - Part I</title><link>https://myhsu.xyz/llvm-machine-scheduler/</link><pubDate>Tue, 16 Sep 2025 00:00:00 +0000</pubDate><author>min@myhsu.dev (Min-Yih Hsu)</author><guid>https://myhsu.xyz/llvm-machine-scheduler/</guid><description>By this point it&amp;rsquo;s evidently that I won&amp;rsquo;t shut up talking about scheduling model in LLVM.1
 I found the fact that it encodes so many low-level details pretty facinated. It has so much potential and could arguably be used in more places &amp;ndash; but the latter is probably a story for another day, because there is still an elephant in the room:
 What about instruction scheduler, which scheduling model was originally invented for?</description><content:encoded><![CDATA[<p>By this point it&rsquo;s evidently that I won&rsquo;t shut up talking about scheduling model in LLVM.<sup id="fnref:1"><a href="#fn:1" class="footnote-ref" role="doc-noteref">1</a></sup></p>
 <p>I found the fact that it encodes so many low-level details pretty facinated. It has so much potential and could arguably be used in more places &ndash; but the latter is probably a story for another day, because there is still an elephant in the room:</p>
