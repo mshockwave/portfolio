@@ -335,6 +335,8 @@ add a1, a0, a0</code></pre>
 <p>Last but not the least, Machine Scheduler is pretty complicated &ndash; but it certainly doesn&rsquo;t help when the debug messages (i.e. <code>-debug-only=machine-scheduler</code>) are cryptic and relatively unstructured. Granted, the amount of information it tries to convey is <em>massive</em>, yet I think we should invent a better framework to <strong>trace</strong> development messages in this scale, as neither the current debug message framework nor the optimization remarks frameowrk seem fit here.</p>
 <h3 id="epilogue">Epilogue</h3>
 <p>This is the second and last part of this series. I hope I shed some lights on how Machine Scheduler decides which instruction is more profitable and the rationale behind it. Just like everything else in LLVM, all the things I&rsquo;ve been talking here in this series are just the tip of an iceberg &ndash; I unfortunately has to omit lots of great topics due to the length and deep beneath this iceberg, there are still many areas in Machine Scheduler we can improve as I illustrated in the last section.</p>
+<h3 id="comments">Comments</h3>
+<p>Feel free to leave comments at <a href="https://github.com/mshockwave/portfolio/discussions/14">https://github.com/mshockwave/portfolio/discussions/14</a></p>
 <div class="footnotes" role="doc-endnotes">
 <hr>
 <ol>
