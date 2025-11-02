@@ -240,3 +240,6 @@ Last but not the least, Machine Scheduler is pretty complicated -- but it certai
 
 ### Epilogue
 This is the second and last part of this series. I hope I shed some lights on how Machine Scheduler decides which instruction is more profitable and the rationale behind it. Just like everything else in LLVM, all the things I've been talking here in this series are just the tip of an iceberg -- I unfortunately has to omit lots of great topics due to the length and deep beneath this iceberg, there are still many areas in Machine Scheduler we can improve as I illustrated in the last section.
+
+### Comments
+Feel free to leave comments at https://github.com/mshockwave/portfolio/discussions/14
