@@ -1,13 +1,12 @@
 +++
 title = "Machine Scheduler in LLVM - Part II"
-date = "2025-09-26"
-draft = true
+date = "2025-11-01"
 tags = ['llvm', 'compiler-instruction-scheduling']
 +++
 
 In the [first part](/llvm-machine-scheduler) of this series, we covered the basic workflow of Machine Scheduler -- LLVM's predominated instruction scheduling framework -- and learned that an instruction could go through three phases of checks before it finally got scheduled: **legality** check, **feasibility** check, and **profitibility** check.
 
-The first two phases -- which were explained in details in that post -- have direct connections with program correctness and avoiding potential processor hazard, respectiviely. The last phase tries to pick the _optimal_ candidate that'll hopefully reduce the register pressures and increase the instruction level parallelism (ILP) -- the two primary goals for instruction scheduling in LLVM. In this post, we're going to start with diving deep into this profitibility check phase.
+The first two phases -- which were explained in details in that post -- have direct connections with program correctness and avoiding potential processor hazard, respectiviely. The last phase tries to pick the _optimal_ candidate that'll hopefully reduce the register pressures and increase the instruction level parallelism (ILP) -- the two primary goals for instruction scheduling in LLVM. In this post, we're going to dive deep into this profitibility check phase.
 
 ### Profitibility Checks
 Making the optimal choice has always been a difficult problem in computer science (as in real life). There is a whole big field telling you how to optimize for a specific set of constraints -- usually with a cost of non-trivial amount of runtime, however. Machine Scheduler, just like other parts of LLVM, prioritizes speed and perhaps maintainability over finding the absolute optimal instruction.
