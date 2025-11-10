@@ -20,7 +20,7 @@ I always like to describe register pressure as a synonym for the number of (conc
 
 In the diagram above, each vertical bars on the left is an live interval for a specific register. A live interval starts from a register definition and ends at its _last_ use that appears right before another register (re)definition. In this simplified scenario, counting the number of overlapping live intervals at a certain point -- either before or after an instruction -- gives you its register pressure.
 
-Live range is basically the duration where a reigster is _reserved_ and blocked out from any other purposes. Therefore, if too many registers are being booked at the same time, the likelyhood a register spilling happens increases -- that's why register pressure is a useful tool to gauge the degree of register spillings.
+Live range is basically the duration where a register is _reserved_ and blocked out from any other purposes. Therefore, if too many registers are being booked at the same time, the likelyhood a register spilling happens increases -- that's why register pressure is a useful tool to gauge the degree of register spillings.
 
 In reality, LLVM tracks register pressure by groups: registers with similar characteristics are put in the same **pressure set** and maintains its own pressure value. Take _scalar_ and _vector_ registers as an example, they are usually assigned into different pressure sets. The pressure induced by any scalar registers are aggregated into a same pressure value; a similar logics applies to vector registers:
 
@@ -35,7 +35,7 @@ Each `PressureDiff` associated with the instruction might get updated during the
 ##### Excess pressure
 How much does the new pressure goes overboard compare to the old pressure. While this sounds exactly like the pressure difference of an individual instruction we just talked about -- and in some cases, it is -- there is a catch here: excess pressure is "filtered" by a per-pressure set _threshold_ value.
 
-The idea is that if we care about every tiny bit of reigster pressure changes, we might lose the big picture because those are just noise. By setting a lower bound threshold, we now calculate the excess pressure with only the pressure values that go over that line:
+The idea is that if we care about every tiny bit of register pressure changes, we might lose the big picture because those are just noise. By setting a lower bound threshold, we now calculate the excess pressure with only the pressure values that go over that line:
 
 ```
 ExcessP = max(NewP, Threshold) - max(OldP, Threshold)
@@ -46,14 +46,14 @@ By this formula, if both new and old pressures are below the threshold, excess p
 ##### Critical Max pressure
 The next register pressure related heuristic compares the new register pressure (i.e. `NewP`) with the maximal pressure we have seen so far in a specific pressure set. To be more specific, this is the maximal pressure from _both_ the top and bottom `SchedBoundary` that are going on at this moment, so critical max pressure -- as it's called in Machine Scheduler -- is truely the maximal pressure of the entire scheduling region at the time.
 
-The value we're interested in here, similar to excess pressure, is the difference between `NewP` and critical max pressure. But unlike excess pressure where the pressure difference can be nagative -- namely, decreasing the pressure -- we only consider the difference when `NewP` is larger than critical max pressure.
+The value we're interested in here, similar to excess pressure, is the difference between `NewP` and critical max pressure. But unlike excess pressure where the pressure difference can be negative -- namely, decreasing the pressure -- we only consider the difference when `NewP` is larger than critical max pressure.
 
 ##### Current Max pressure
 As confusing as the naming can go, _current_ max pressure represents the maximal pressure of a pressure set in the **original**, unscheduled program. Seriously, people should just call it "original max pressure". Aside from that, we also take the difference between `NewP` and current max pressure, if the former is larger than the latter.
 
-These are the three metrics `tryCandidate` really cares about when it comes to the per-instruction register pressure impact. The execess pressure is always used before other two, as it represents the before v.s. after pressure of a specific pressure set, which is much more meaningful in most cases.
+These are the three metrics `tryCandidate` really cares about when it comes to the per-instruction register pressure impact. The execess pressure is always used before other two, as it represents the before vs. after pressure of a specific pressure set, which is much more meaningful in most cases.
 
-Before wrapping up this part, I would like to dive a little more into the technical details and breakdown the meanings of some key data structures -- most of them were already covered in the previous passages -- that have even _more_ confusing names than "current max pressure" v.s. "critical max pressure" in this part of the Machine Scheduler 🙃:
+Before wrapping up this part, I would like to dive a little more into the technical details and breakdown the meanings of some key data structures -- most of them were already covered in the previous passages -- that have even _more_ confusing names than "current max pressure" vs. "critical max pressure" in this part of the Machine Scheduler 🙃:
 
 |     Class Name     |                                                                                  Description                                                                                 |
 |:------------------:|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|
@@ -72,9 +72,9 @@ To explain resource pressure, we can actually draw an analogy from register pres
 
 Here, individual processor resource (i.e. pipe) is like a register pressure set. And the goal of reducing resource pressure here, is to prevent the accumulated **occupancy cycles** within a processor resource from exceeding a certain _threshold_.
 
-This threshold is the total latency we have scheduled so far -- which is roughly equal to the **critical path length**. Critical path, by definition, is the number of cycles in the longest serial execution path. In a perfectly parallelized system, the total execution time of the current region will be bounded by the ciritical path length.
+This threshold is the total latency we have scheduled so far -- which is roughly equal to the **critical path length**. Critical path, by definition, is the number of cycles in the longest serial execution path. In a perfectly parallelized system, the total execution time of the current region will be bounded by the critical path length.
 
-Well, **IF** we have a perfectly parallelized system, that is. But such a theoritical upperbound is the _exact_ thing we need here to gauge how well we're doing ILP-wise in the region we're currently scheduling -- whenever the occupancies of a single resource go over this value, there might still be rooms for running more instructions in parallel.
+Well, **IF** we have a perfectly parallelized system, that is. But such a theoretical upperbound is the _exact_ thing we need here to gauge how well we're doing ILP-wise in the region we're currently scheduling -- whenever the occupancies of a single resource go over this value, there might still be rooms for running more instructions in parallel.
 
 In other words, conceptually, we want to avoid _over-concentrated_ pipes like this:
 
@@ -113,7 +113,7 @@ An instrucion consumes one of the execution pipes for a duration of its occupanc
 
 As a consequence, the effective occupancy of the same instruction on `PipeA`, `PipeB`, and `PipeC` would be `N / 1`, `N / 4`, `N / 2`, respectively. This would be the occupancy value we use to check whether a single resource is over concentrated as introduced earlier. However, compiler itself -- as a software -- tries to avoid floating point numbers as much as possible, so we're gonna normalize it by multiplying them with their least common multiple (LCM), yielding `4 * N`, `N`, and `2 * N`, respectively.
 
-Now, in addition to the number of units, which is proportional to the result throughput in each pipe, we also need to consider the throughput on the other end of the pipe -- the _input_ rate, which is modeled by the **issue width**. Issue width represents how many instrutions / uops could be pumped into these pipes per cycle. Combining issue width with the number of units per hardware reousrce, we can assign an _ingress_ and _egress_ ratio for each resource. For example, given an issue width of 3, `PipeB` has an ingress v.s. egress ratio of `3 : 4`. This ratio is an important invariant we have to keep across normalization.
+Now, in addition to the number of units, which is proportional to the result throughput in each pipe, we also need to consider the throughput on the other end of the pipe -- the _input_ rate, which is modeled by the **issue width**. Issue width represents how many instrutions / uops could be pumped into these pipes per cycle. Combining issue width with the number of units per hardware reousrce, we can assign an _ingress_ and _egress_ ratio for each resource. For example, given an issue width of 3, `PipeB` has an ingress vs. egress ratio of `3 : 4`. This ratio is an important invariant we have to keep across normalization.
 
 The easiest way to preserve this ratio is by taking issue width into the LCM calculation as well:
 
@@ -178,7 +178,7 @@ mul t0, s0, s1
 add a1, a0, a0
 ```
 
-The critical path in this case would be domindated by the load instruction, `ld  a0, 0(s0)`, therefore, the **nominal** critical path length is equal to 3 cycles[^2]. But remember, we have to scale this number with the latency factor, so the **normalized** critical path length is `12 * 3 = 36` cycles.
+The critical path in this case would be dominated by the load instruction, `ld  a0, 0(s0)`, therefore, the **nominal** critical path length is equal to 3 cycles[^2]. But remember, we have to scale this number with the latency factor, so the **normalized** critical path length is `12 * 3 = 36` cycles.
 
 [^2]: In a top-down schedule, the critical path length is effectively defined as the number of cycles up to the point where the last instruction was _issued_, so the latency of `add a1, a0, a0` is not accounted for.
 
@@ -220,7 +220,7 @@ So all the normalization processes we discussed early are actually just trying t
 ### So, what's next?
 Perhaps surprisingly, I think there are actually many works we can do for in-order processors in this area!
 
-Compared to other parts of LLVM backend, Machine Scheduler hasn't received many improvements or even just changes in the past decade. I am convinced that this is caused by the fact that out-of-order processors have dominated the market and hence the compiler development space in the past few decades or so -- and out-of-order processors are much more agnostic or resilient to the instruction scheduling quality, as the whole premises of out-of-order-ness is to do the exactly same scheduling in hardware, during runtime, yet with more precision. In other words -- it's usually not worth the efforts to improve Machine Scheduler for out-of-order processors. To be fair, reducing the number of register spillings (through instruction scheduling) still helps, but even on that regards, missing a few register spillings generally won't make a huge differernt performance-wise on modern out-of-order processors.
+Compared to other parts of LLVM backend, Machine Scheduler hasn't received many improvements or even just changes in the past decade. I am convinced that this is caused by the fact that out-of-order processors have dominated the market and hence the compiler development space in the past few decades or so -- and out-of-order processors are much more agnostic or resilient to the instruction scheduling quality, as the whole premises of out-of-order-ness is to do the exactly same scheduling in hardware, during runtime, yet with more precision. In other words -- it's usually not worth the efforts to improve Machine Scheduler for out-of-order processors. To be fair, reducing the number of register spillings (through instruction scheduling) still helps, but even on that regards, missing a few register spillings generally won't make a huge difference performance-wise on modern out-of-order processors.
 
 It's a different story for in-order processors, of course. Stallings and register spillings both make huge impacts on performance, and therefore the importance of instruction scheduling quality for these processors. Sadly in the past few decades, most in-order processors are embedded ones, where either the hardware is not complicated enough to warrant more advanced scheduling techniques, or the fact that performance altogether is just not the first priority to them. All of these factors contribute to the relatively staggering development in Machine Scheduler and to some extent, the scheduling model framework.
 
